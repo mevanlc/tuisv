@@ -50,17 +50,7 @@ impl CsvData {
             }
         }
 
-        let mut column_starts = Vec::with_capacity(column_count);
-        let mut content_width = 0usize;
-        for width in &widths {
-            column_starts.push(content_width);
-            content_width = content_width
-                .saturating_add(*width)
-                .saturating_add(COLUMN_GAP);
-        }
-        if column_count > 0 {
-            content_width = content_width.saturating_sub(COLUMN_GAP);
-        }
+        let (column_starts, content_width) = column_geometry(&widths);
 
         Ok(Self {
             header,
@@ -74,6 +64,33 @@ impl CsvData {
     pub fn column_count(&self) -> usize {
         self.widths.len()
     }
+
+    pub(crate) fn resize_column(&mut self, column: usize, delta: isize) {
+        let Some(width) = self.widths.get(column).copied() else {
+            return;
+        };
+        self.set_column_width(column, width.saturating_add_signed(delta));
+    }
+
+    pub(crate) fn set_column_width(&mut self, column: usize, width: usize) {
+        let Some(column_width) = self.widths.get_mut(column) else {
+            return;
+        };
+        *column_width = width.max(1);
+        (self.column_starts, self.content_width) = column_geometry(&self.widths);
+    }
+}
+
+fn column_geometry(widths: &[usize]) -> (Vec<usize>, usize) {
+    let mut column_starts = Vec::with_capacity(widths.len());
+    let mut content_width = 0usize;
+    for width in widths {
+        column_starts.push(content_width);
+        content_width = content_width
+            .saturating_add(*width)
+            .saturating_add(COLUMN_GAP);
+    }
+    (column_starts, content_width)
 }
 
 fn display_field(field: &str) -> String {
@@ -108,8 +125,23 @@ mod tests {
         assert_eq!(data.column_count(), 3);
         assert_eq!(data.widths, vec![5, 8, 5]);
         assert_eq!(data.column_starts, vec![0, 7, 17]);
-        assert_eq!(data.content_width, 22);
+        assert_eq!(data.content_width, 24);
         assert!(data.rows[1].get(2).is_none());
+    }
+
+    #[test]
+    fn resizing_a_column_recomputes_geometry_and_clamps_to_one_cell() {
+        let mut data = CsvData::from_reader("one,two,three\na,b,c\n".as_bytes(), true).unwrap();
+
+        data.set_column_width(1, 1);
+        assert_eq!(data.widths, [3, 1, 5]);
+        assert_eq!(data.column_starts, [0, 5, 8]);
+        assert_eq!(data.content_width, 15);
+
+        data.resize_column(0, -20);
+        assert_eq!(data.widths, [1, 1, 5]);
+        assert_eq!(data.column_starts, [0, 3, 6]);
+        assert_eq!(data.content_width, 13);
     }
 
     #[test]

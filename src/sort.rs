@@ -42,6 +42,20 @@ impl SortState {
         self.row_order.get(displayed_row).copied()
     }
 
+    pub(crate) fn indicator(&self, column: usize) -> Option<char> {
+        self.columns
+            .iter()
+            .position(|sorted_column| sorted_column.column == column)
+            .map(
+                |position| match (position == 0, self.columns[position].direction) {
+                    (true, SortDirection::Descending) => '▼',
+                    (true, SortDirection::Ascending) => '▲',
+                    (false, SortDirection::Descending) => '▽',
+                    (false, SortDirection::Ascending) => '△',
+                },
+            )
+    }
+
     #[cfg(test)]
     pub(crate) fn sorted_columns(&self) -> Vec<usize> {
         self.columns.iter().map(|column| column.column).collect()
@@ -210,6 +224,7 @@ mod tests {
         assert_eq!(displayed_column(&data, &sort, 0), ["b", "d", "a", "c"]);
         assert_eq!(sort.columns[0].direction, SortDirection::Descending);
         assert!(sort.columns[0].numeric);
+        assert_eq!(sort.indicator(1), Some('▼'));
 
         sort.toggle_column(&data, 2);
         assert_eq!(
@@ -220,6 +235,8 @@ mod tests {
             [2, 1]
         );
         assert_eq!(displayed_column(&data, &sort, 0), ["d", "c", "b", "a"]);
+        assert_eq!(sort.indicator(2), Some('▼'));
+        assert_eq!(sort.indicator(1), Some('▽'));
 
         sort.toggle_column(&data, 1);
         assert_eq!(
@@ -231,6 +248,12 @@ mod tests {
         );
         assert_eq!(sort.columns[1].direction, SortDirection::Ascending);
         assert_eq!(displayed_column(&data, &sort, 0), ["c", "d", "a", "b"]);
+        assert_eq!(sort.indicator(2), Some('▼'));
+        assert_eq!(sort.indicator(1), Some('△'));
+
+        sort.toggle_column(&data, 2);
+        assert_eq!(sort.indicator(2), Some('▲'));
+        assert_eq!(sort.indicator(1), Some('△'));
     }
 
     #[test]

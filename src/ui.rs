@@ -5,11 +5,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, CellPosition},
-    data::{COLUMN_GAP, CsvData},
+    data::COLUMN_GAP,
 };
 
 const COLUMN_COLORS: [Color; 6] = [
@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_record(
             frame,
             row_area(area, screen_row),
-            &app.data,
+            app,
             header,
             None,
             app.column_offset,
@@ -74,7 +74,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             render_record(
                 frame,
                 area,
-                &app.data,
+                app,
                 app.data.header.as_deref().unwrap_or_default(),
                 None,
                 app.column_offset,
@@ -91,7 +91,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_record(
             frame,
             area,
-            &app.data,
+            app,
             record,
             app.selected.filter(|selected| selected.row == data_row),
             app.column_offset,
@@ -113,42 +113,45 @@ fn row_area(area: Rect, row: usize) -> Rect {
 fn render_record(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &CsvData,
+    app: &App,
     record: &[String],
     selected: Option<CellPosition>,
     horizontal_offset: usize,
     base_style: Style,
 ) {
-    let line = record_line(data, record, selected, base_style);
+    let line = record_line(app, record, selected, base_style);
     Paragraph::new(line)
         .style(base_style)
         .scroll((0, u16::try_from(horizontal_offset).unwrap_or(u16::MAX)))
         .render(area, frame.buffer_mut());
 }
 
-fn record_line<'a>(
-    data: &CsvData,
-    record: &'a [String],
+fn record_line(
+    app: &App,
+    record: &[String],
     selected: Option<CellPosition>,
     base_style: Style,
-) -> Line<'a> {
-    let mut spans = Vec::with_capacity(data.column_count().saturating_mul(2));
+) -> Line<'static> {
+    let data = &app.data;
+    let mut spans = Vec::with_capacity(data.column_count().saturating_mul(3));
     let is_header = base_style.bg == Some(Color::DarkGray);
 
     for column in 0..data.column_count() {
         let value = record.get(column).map_or("", String::as_str);
-        let padding = data.widths[column].saturating_sub(UnicodeWidthStr::width(value));
         let style = if is_header {
             base_style
         } else {
             column_style(column, selected.is_some_and(|cell| cell.column == column))
         };
-        spans.push(Span::styled(
-            format!("{value}{}", " ".repeat(padding)),
-            style,
-        ));
+        push_cell(&mut spans, value, data.widths[column], style);
 
-        if column + 1 < data.column_count() {
+        if is_header {
+            spans.push(Span::styled(
+                app.sort_indicator(column).unwrap_or(' ').to_string(),
+                base_style,
+            ));
+            spans.push(Span::styled("│", base_style.fg(Color::Gray)));
+        } else {
             spans.push(Span::styled(" ".repeat(COLUMN_GAP), base_style));
         }
     }
@@ -156,11 +159,57 @@ fn record_line<'a>(
     Line::from(spans)
 }
 
+fn push_cell(spans: &mut Vec<Span<'static>>, value: &str, width: usize, style: Style) {
+    let value_width = UnicodeWidthStr::width(value);
+    if value_width <= width {
+        spans.push(Span::styled(
+            format!("{value}{}", " ".repeat(width - value_width)),
+            style,
+        ));
+        return;
+    }
+
+    let prefix_width = width.saturating_sub(1);
+    let mut prefix = String::new();
+    let mut displayed_width = 0usize;
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if displayed_width.saturating_add(character_width) > prefix_width {
+            break;
+        }
+        prefix.push(character);
+        displayed_width = displayed_width.saturating_add(character_width);
+    }
+    prefix.push_str(&" ".repeat(prefix_width.saturating_sub(displayed_width)));
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix, style));
+    }
+    let ellipsis_style = if style.add_modifier.contains(Modifier::REVERSED) {
+        style.bg(Color::Gray)
+    } else {
+        style.fg(Color::Gray)
+    };
+    spans.push(Span::styled("…", ellipsis_style));
+}
+
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 
     use super::*;
+    use crate::data::CsvData;
+
+    fn control_key(character: char) -> Event {
+        Event::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ))
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
 
     fn render(csv: &str, has_header: bool, sticky_header: bool, width: u16, height: u16) -> App {
         let data = CsvData::from_reader(csv.as_bytes(), has_header).unwrap();
@@ -188,11 +237,85 @@ mod tests {
         assert_eq!(buffer[(0, 0)].symbol(), "n");
         assert_eq!(buffer[(0, 0)].bg, Color::DarkGray);
         assert!(buffer[(0, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(6, 0)].symbol(), "│");
         assert_eq!(buffer[(0, 1)].fg, Color::Cyan);
         assert!(buffer[(0, 1)].modifier.contains(Modifier::REVERSED));
         assert_eq!(buffer[(7, 1)].fg, Color::Green);
         assert_eq!(buffer[(0, 2)].symbol(), "G");
         assert_eq!(buffer[(7, 2)].symbol(), "R");
+    }
+
+    #[test]
+    fn narrow_columns_end_truncated_values_with_a_gray_ellipsis() {
+        let data = CsvData::from_reader("header,other\nabcdefgh,z\nijklmnop,y\n".as_bytes(), true)
+            .unwrap();
+        let mut app = App::new(data, true);
+        app.data.set_column_width(0, 4);
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(0, 0)].symbol(), "h");
+        assert_eq!(buffer[(3, 0)].symbol(), "…");
+        assert_eq!(buffer[(3, 0)].fg, Color::Gray);
+        assert_eq!(buffer[(5, 0)].symbol(), "│");
+        assert_eq!(buffer[(0, 1)].symbol(), "a");
+        assert_eq!(buffer[(3, 1)].symbol(), "…");
+        assert_eq!(buffer[(3, 1)].bg, Color::Gray);
+        assert!(buffer[(3, 1)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(6, 1)].symbol(), "z");
+        assert_eq!(buffer[(3, 2)].symbol(), "…");
+        assert_eq!(buffer[(3, 2)].fg, Color::Gray);
+    }
+
+    #[test]
+    fn truncation_does_not_split_a_wide_character() {
+        let data = CsvData::from_reader("header\n界x\n".as_bytes(), true).unwrap();
+        let mut app = App::new(data, true);
+        app.data.set_column_width(0, 2);
+        let backend = TestBackend::new(6, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(0, 1)].symbol(), " ");
+        assert_eq!(buffer[(1, 1)].symbol(), "…");
+    }
+
+    #[test]
+    fn headers_render_primary_and_secondary_sort_directions() {
+        let data = CsvData::from_reader("first,second\nb,2\na,1\n".as_bytes(), true).unwrap();
+        let mut app = App::new(data, true);
+        app.handle_event(control_key('s'));
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(control_key('s'));
+        let backend = TestBackend::new(18, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(5, 0)].symbol(), "▽");
+        assert_eq!(terminal.backend().buffer()[(6, 0)].symbol(), "│");
+        assert_eq!(terminal.backend().buffer()[(13, 0)].symbol(), "▼");
+        assert_eq!(terminal.backend().buffer()[(14, 0)].symbol(), "│");
+
+        app.handle_event(key(KeyCode::Left));
+        app.handle_event(control_key('s'));
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(control_key('s'));
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(5, 0)].symbol(), "△");
+        assert_eq!(terminal.backend().buffer()[(13, 0)].symbol(), "▲");
     }
 
     #[test]

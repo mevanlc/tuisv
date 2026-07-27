@@ -14,12 +14,17 @@ Options:
   -V, --version           Print version
 ```
 
-Use the arrow keys to move the selected cell. The vertical and horizontal
+Use the arrow keys to move the selected cell. Ctrl-Shift-Left and
+Ctrl-Shift-Right shrink or grow its column; header `│` handles can also be dragged
+to resize columns. Truncated cells end in a gray `…`. The vertical and horizontal
 mouse wheels pan the viewport without changing the selection; Shift-wheel is a
-horizontal-scroll fallback. Click a column header or press Ctrl-S to sort the
-selected cell's column. The first sort is descending; repeating a sorted column
-toggles its direction, while newly sorted columns become primary and retain the
-existing columns as secondary sorts. Numeric columns containing only integers or
+horizontal-scroll fallback.
+
+Click a column header or press Ctrl-S to sort the selected cell's column. The
+first sort is descending; repeating a sorted column toggles its direction, while
+newly sorted columns become primary and retain the existing columns as secondary
+sorts. `▼` and `▲` mark primary descending and ascending sorts; `▽` and `△` mark
+their secondary counterparts. Numeric columns containing only integers or
 decimals with optional leading minus signs are ordered numerically. Press Ctrl-R
 to clear all sorting and restore file order. Press `q`, `Q`, or Ctrl-C to exit.
 

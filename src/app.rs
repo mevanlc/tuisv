@@ -20,6 +20,13 @@ pub struct CellPosition {
     pub column: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ColumnResizeDrag {
+    column: usize,
+    initial_screen_column: u16,
+    initial_width: usize,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub data: CsvData,
@@ -28,6 +35,7 @@ pub struct App {
     pub row_offset: usize,
     pub column_offset: usize,
     sort: SortState,
+    column_resize_drag: Option<ColumnResizeDrag>,
     viewport_width: usize,
     viewport_height: usize,
     quit: bool,
@@ -45,6 +53,7 @@ impl App {
             row_offset: 0,
             column_offset: 0,
             sort,
+            column_resize_drag: None,
             viewport_width: 0,
             viewport_height: 0,
             quit: false,
@@ -93,6 +102,10 @@ impl App {
             .map(Vec::as_slice)
     }
 
+    pub(crate) fn sort_indicator(&self, column: usize) -> Option<char> {
+        self.sort.indicator(column)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
@@ -109,6 +122,12 @@ impl App {
                 self.sort.reset();
             }
             KeyCode::Char('q' | 'Q') => self.quit = true,
+            KeyCode::Left if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                self.resize_selected_column(-1);
+            }
+            KeyCode::Right if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                self.resize_selected_column(1);
+            }
             KeyCode::Up => self.move_selection(-1, 0),
             KeyCode::Down => self.move_selection(1, 0),
             KeyCode::Left => self.move_selection(0, -1),
@@ -120,20 +139,45 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.sort_from_header_click(mouse.column, mouse.row);
+                if let Some(column) = self.resize_handle_at(mouse.column, mouse.row) {
+                    self.column_resize_drag = Some(ColumnResizeDrag {
+                        column,
+                        initial_screen_column: mouse.column,
+                        initial_width: self.data.widths[column],
+                    });
+                } else {
+                    self.column_resize_drag = None;
+                    self.sort_from_header_click(mouse.column, mouse.row);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.resize_dragged_column(mouse.column);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.column_resize_drag = None;
             }
             MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.column_resize_drag = None;
                 self.pan_horizontal(-(HORIZONTAL_SCROLL_AMOUNT as isize));
             }
             MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.column_resize_drag = None;
                 self.pan_horizontal(HORIZONTAL_SCROLL_AMOUNT as isize);
             }
-            MouseEventKind::ScrollUp => self.pan_vertical(-(VERTICAL_SCROLL_AMOUNT as isize)),
-            MouseEventKind::ScrollDown => self.pan_vertical(VERTICAL_SCROLL_AMOUNT as isize),
+            MouseEventKind::ScrollUp => {
+                self.column_resize_drag = None;
+                self.pan_vertical(-(VERTICAL_SCROLL_AMOUNT as isize));
+            }
+            MouseEventKind::ScrollDown => {
+                self.column_resize_drag = None;
+                self.pan_vertical(VERTICAL_SCROLL_AMOUNT as isize);
+            }
             MouseEventKind::ScrollLeft => {
+                self.column_resize_drag = None;
                 self.pan_horizontal(-(HORIZONTAL_SCROLL_AMOUNT as isize));
             }
             MouseEventKind::ScrollRight => {
+                self.column_resize_drag = None;
                 self.pan_horizontal(HORIZONTAL_SCROLL_AMOUNT as isize);
             }
             _ => {}
@@ -141,27 +185,64 @@ impl App {
     }
 
     fn sort_from_header_click(&mut self, screen_column: u16, screen_row: u16) {
-        let header_is_visible = self.data.header.is_some()
-            && (self.sticky_header || self.row_offset == 0)
-            && screen_row == 0;
-        if !header_is_visible {
+        let Some(content_column) = self.header_content_column(screen_column, screen_row) else {
             return;
-        }
-
-        let content_column = self
-            .column_offset
-            .saturating_add(usize::from(screen_column));
+        };
         let clicked_column = self
             .data
             .column_starts
             .iter()
             .zip(&self.data.widths)
             .position(|(start, width)| {
-                (*start..start.saturating_add(*width)).contains(&content_column)
+                content_column >= *start && content_column <= start.saturating_add(*width)
             });
         if let Some(column) = clicked_column {
             self.sort.toggle_column(&self.data, column);
         }
+    }
+
+    fn resize_handle_at(&self, screen_column: u16, screen_row: u16) -> Option<usize> {
+        let content_column = self.header_content_column(screen_column, screen_row)?;
+        self.data
+            .column_starts
+            .iter()
+            .zip(&self.data.widths)
+            .position(|(start, width)| {
+                content_column == start.saturating_add(*width).saturating_add(1)
+            })
+    }
+
+    fn header_content_column(&self, screen_column: u16, screen_row: u16) -> Option<usize> {
+        (self.data.header.is_some()
+            && (self.sticky_header || self.row_offset == 0)
+            && screen_row == 0)
+            .then(|| {
+                self.column_offset
+                    .saturating_add(usize::from(screen_column))
+            })
+    }
+
+    fn resize_selected_column(&mut self, delta: isize) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        self.data.resize_column(selected.column, delta);
+        self.ensure_selection_visible();
+    }
+
+    fn resize_dragged_column(&mut self, screen_column: u16) {
+        let Some(drag) = self.column_resize_drag else {
+            return;
+        };
+        let width = if screen_column >= drag.initial_screen_column {
+            drag.initial_width
+                .saturating_add(usize::from(screen_column - drag.initial_screen_column))
+        } else {
+            drag.initial_width
+                .saturating_sub(usize::from(drag.initial_screen_column - screen_column))
+        };
+        self.data.set_column_width(drag.column, width);
+        self.clamp_offsets();
     }
 
     fn move_selection(&mut self, row_delta: isize, column_delta: isize) {
@@ -292,13 +373,17 @@ mod tests {
         })
     }
 
-    fn click(column: u16, row: u16) -> Event {
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
         Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
+            kind,
             column,
             row,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    fn click(column: u16, row: u16) -> Event {
+        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
     fn displayed_column(app: &App, column: usize) -> Vec<String> {
@@ -381,11 +466,61 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_visible_header_cell_sorts_while_clicking_a_gap_does_not() {
+    fn control_shift_arrows_resize_the_selected_column_without_moving_selection() {
+        let mut app = app("first,second\nabcdef,x\n", true, true);
+        let selected = app.selected;
+        let resize_modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        app.handle_event(modified_key(KeyCode::Left, resize_modifiers));
+        assert_eq!(app.data.widths[0], 5);
+        assert_eq!(app.data.column_starts[1], 7);
+        assert_eq!(app.selected, selected);
+
+        app.handle_event(modified_key(KeyCode::Right, resize_modifiers));
+        assert_eq!(app.data.widths[0], 6);
+        assert_eq!(app.data.column_starts[1], 8);
+        assert_eq!(app.selected, selected);
+
+        for _ in 0..10 {
+            app.handle_event(modified_key(KeyCode::Left, resize_modifiers));
+        }
+        assert_eq!(app.data.widths[0], 1);
+    }
+
+    #[test]
+    fn control_shift_arrows_do_nothing_without_a_selected_cell() {
+        let mut app = app("header\n", true, true);
+        let width = app.data.widths[0];
+
+        app.handle_event(modified_key(
+            KeyCode::Left,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+
+        assert_eq!(app.data.widths[0], width);
+    }
+
+    #[test]
+    fn dragging_a_header_handle_resizes_its_column() {
+        let mut app = app("first,second\nabcdef,x\n", true, true);
+
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 7, 0));
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 4, 2));
+        assert_eq!(app.data.widths[0], 3);
+        assert_eq!(app.data.column_starts[1], 5);
+        assert!(app.sort.sorted_columns().is_empty());
+
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 4, 2));
+        assert!(app.column_resize_drag.is_none());
+    }
+
+    #[test]
+    fn clicking_a_visible_header_cell_sorts_while_clicking_a_handle_does_not() {
         let mut app = app("left,right\na,1\nb,2\n", true, true);
 
-        app.handle_event(click(4, 0));
+        app.handle_event(click(5, 0));
         assert!(app.sort.sorted_columns().is_empty());
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 5, 0));
 
         app.column_offset = 4;
         app.handle_event(click(2, 0));
