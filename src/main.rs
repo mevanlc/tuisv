@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod data;
+mod sort;
 mod ui;
 
 use std::{error::Error, io, process::ExitCode};

@@ -3,13 +3,13 @@ use std::{io, io::stdout, panic};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
 };
 use ratatui::DefaultTerminal;
 
-use crate::{data::CsvData, ui};
+use crate::{data::CsvData, sort::SortState, ui};
 
 const VERTICAL_SCROLL_AMOUNT: usize = 3;
 const HORIZONTAL_SCROLL_AMOUNT: usize = 4;
@@ -27,6 +27,7 @@ pub struct App {
     pub selected: Option<CellPosition>,
     pub row_offset: usize,
     pub column_offset: usize,
+    sort: SortState,
     viewport_width: usize,
     viewport_height: usize,
     quit: bool,
@@ -36,12 +37,14 @@ impl App {
     pub fn new(data: CsvData, sticky_header: bool) -> Self {
         let selected = (!data.rows.is_empty() && data.column_count() > 0)
             .then_some(CellPosition { row: 0, column: 0 });
+        let sort = SortState::new(data.rows.len());
         Self {
             data,
             sticky_header,
             selected,
             row_offset: 0,
             column_offset: 0,
+            sort,
             viewport_width: 0,
             viewport_height: 0,
             quit: false,
@@ -83,6 +86,13 @@ impl App {
         data_row + usize::from(!self.sticky_header && self.data.header.is_some())
     }
 
+    pub(crate) fn displayed_row(&self, displayed_row: usize) -> Option<&[String]> {
+        self.sort
+            .displayed_row_index(displayed_row)
+            .and_then(|row| self.data.rows.get(row))
+            .map(Vec::as_slice)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
@@ -90,6 +100,14 @@ impl App {
 
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('s' | 'S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(selected) = self.selected {
+                    self.sort.toggle_column(&self.data, selected.column);
+                }
+            }
+            KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.sort.reset();
+            }
             KeyCode::Char('q' | 'Q') => self.quit = true,
             KeyCode::Up => self.move_selection(-1, 0),
             KeyCode::Down => self.move_selection(1, 0),
@@ -101,6 +119,9 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.sort_from_header_click(mouse.column, mouse.row);
+            }
             MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.pan_horizontal(-(HORIZONTAL_SCROLL_AMOUNT as isize));
             }
@@ -116,6 +137,30 @@ impl App {
                 self.pan_horizontal(HORIZONTAL_SCROLL_AMOUNT as isize);
             }
             _ => {}
+        }
+    }
+
+    fn sort_from_header_click(&mut self, screen_column: u16, screen_row: u16) {
+        let header_is_visible = self.data.header.is_some()
+            && (self.sticky_header || self.row_offset == 0)
+            && screen_row == 0;
+        if !header_is_visible {
+            return;
+        }
+
+        let content_column = self
+            .column_offset
+            .saturating_add(usize::from(screen_column));
+        let clicked_column = self
+            .data
+            .column_starts
+            .iter()
+            .zip(&self.data.widths)
+            .position(|(start, width)| {
+                (*start..start.saturating_add(*width)).contains(&content_column)
+            });
+        if let Some(column) = clicked_column {
+            self.sort.toggle_column(&self.data, column);
         }
     }
 
@@ -234,6 +279,10 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
     fn wheel(kind: MouseEventKind, modifiers: KeyModifiers) -> Event {
         Event::Mouse(MouseEvent {
             kind,
@@ -241,6 +290,21 @@ mod tests {
             row: 0,
             modifiers,
         })
+    }
+
+    fn click(column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn displayed_column(app: &App, column: usize) -> Vec<String> {
+        (0..app.data.rows.len())
+            .map(|row| app.displayed_row(row).unwrap()[column].clone())
+            .collect()
     }
 
     #[test]
@@ -298,6 +362,48 @@ mod tests {
         assert_eq!(app.scrollable_row_count(), 4);
         assert_eq!(app.row_offset, 2);
         assert_eq!(app.visual_row_for_data(0), 1);
+    }
+
+    #[test]
+    fn control_s_sorts_the_selected_column_and_control_r_resets() {
+        let mut app = app("name,number\na,2\nb,10\nc,1\n", true, true);
+        app.handle_event(key(KeyCode::Right));
+
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["b", "a", "c"]);
+
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["c", "a", "b"]);
+
+        app.handle_event(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.sort.sorted_columns().is_empty());
+        assert_eq!(displayed_column(&app, 0), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn clicking_a_visible_header_cell_sorts_while_clicking_a_gap_does_not() {
+        let mut app = app("left,right\na,1\nb,2\n", true, true);
+
+        app.handle_event(click(4, 0));
+        assert!(app.sort.sorted_columns().is_empty());
+
+        app.column_offset = 4;
+        app.handle_event(click(2, 0));
+        assert_eq!(app.sort.sorted_columns(), [1]);
+        assert_eq!(displayed_column(&app, 0), ["b", "a"]);
+
+        app.handle_event(click(2, 0));
+        assert_eq!(displayed_column(&app, 0), ["a", "b"]);
+    }
+
+    #[test]
+    fn scrolling_header_only_accepts_clicks_while_visible() {
+        let mut app = app("header\na\nb\n", true, false);
+        app.row_offset = 1;
+
+        app.handle_event(click(0, 0));
+
+        assert!(app.sort.sorted_columns().is_empty());
     }
 
     #[test]

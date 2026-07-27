@@ -16,7 +16,12 @@ Options:
 
 Use the arrow keys to move the selected cell. The vertical and horizontal
 mouse wheels pan the viewport without changing the selection; Shift-wheel is a
-horizontal-scroll fallback. Press `q`, `Q`, or Ctrl-C to exit.
+horizontal-scroll fallback. Click a column header or press Ctrl-S to sort the
+selected cell's column. The first sort is descending; repeating a sorted column
+toggles its direction, while newly sorted columns become primary and retain the
+existing columns as secondary sorts. Numeric columns containing only integers or
+decimals with optional leading minus signs are ordered numerically. Press Ctrl-R
+to clear all sorting and restore file order. Press `q`, `Q`, or Ctrl-C to exit.
 
 The file is read fully into memory as UTF-8 CSV. Embedded control characters
 are shown as escapes so each record occupies one terminal row.

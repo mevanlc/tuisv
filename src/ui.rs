@@ -85,7 +85,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
         let data_row =
             visual_row.saturating_sub(usize::from(!app.sticky_header && app.data.header.is_some()));
-        let Some(record) = app.data.rows.get(data_row) else {
+        let Some(record) = app.displayed_row(data_row) else {
             break;
         };
         render_record(
