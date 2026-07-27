@@ -65,26 +65,33 @@ impl SortState {
         self.columns.iter().map(|column| column.column).collect()
     }
 
-    pub(crate) fn toggle_column(&mut self, data: &CsvData, column: usize) {
+    pub(crate) fn sort_by_column(&mut self, data: &CsvData, column: usize) {
         if column >= data.column_count() {
             return;
         }
 
-        if let Some(sorted_column) = self
+        match self
             .columns
-            .iter_mut()
-            .find(|sorted_column| sorted_column.column == column)
+            .iter()
+            .position(|sorted_column| sorted_column.column == column)
         {
-            sorted_column.direction = sorted_column.direction.toggled();
-        } else {
-            self.columns.insert(
-                0,
-                SortColumn {
-                    column,
-                    direction: SortDirection::Descending,
-                    numeric: is_numeric_column(data, column),
-                },
-            );
+            Some(0) => {
+                self.columns[0].direction = self.columns[0].direction.toggled();
+            }
+            Some(position) => {
+                let sorted_column = self.columns.remove(position);
+                self.columns.insert(0, sorted_column);
+            }
+            None => {
+                self.columns.insert(
+                    0,
+                    SortColumn {
+                        column,
+                        direction: SortDirection::Descending,
+                        numeric: is_numeric_column(data, column),
+                    },
+                );
+            }
         }
 
         self.apply(data);
@@ -223,17 +230,17 @@ mod tests {
     }
 
     #[test]
-    fn new_columns_are_pushed_and_existing_columns_toggle_in_place() {
+    fn secondary_columns_are_promoted_before_their_direction_toggles() {
         let data = data("name,number,group\na,2,x\nb,10,x\nc,1,y\nd,3,y\n");
         let mut sort = SortState::new(data.rows.len());
 
-        sort.toggle_column(&data, 1);
+        sort.sort_by_column(&data, 1);
         assert_eq!(displayed_column(&data, &sort, 0), ["b", "d", "a", "c"]);
         assert_eq!(sort.columns[0].direction, SortDirection::Descending);
         assert!(sort.columns[0].numeric);
         assert_eq!(sort.indicator(1), Some('▼'));
 
-        sort.toggle_column(&data, 2);
+        sort.sort_by_column(&data, 2);
         assert_eq!(
             sort.columns
                 .iter()
@@ -245,21 +252,29 @@ mod tests {
         assert_eq!(sort.indicator(2), Some('▼'));
         assert_eq!(sort.indicator(1), Some('▽'));
 
-        sort.toggle_column(&data, 1);
+        sort.sort_by_column(&data, 1);
         assert_eq!(
             sort.columns
                 .iter()
                 .map(|column| column.column)
                 .collect::<Vec<_>>(),
-            [2, 1]
+            [1, 2]
         );
-        assert_eq!(sort.columns[1].direction, SortDirection::Ascending);
+        assert_eq!(sort.columns[0].direction, SortDirection::Descending);
+        assert_eq!(displayed_column(&data, &sort, 0), ["b", "d", "a", "c"]);
+        assert_eq!(sort.indicator(1), Some('▼'));
+        assert_eq!(sort.indicator(2), Some('▽'));
+
+        sort.sort_by_column(&data, 1);
+        assert_eq!(sort.columns[0].direction, SortDirection::Ascending);
+        assert_eq!(displayed_column(&data, &sort, 0), ["c", "a", "d", "b"]);
+        assert_eq!(sort.indicator(1), Some('▲'));
+        assert_eq!(sort.indicator(2), Some('▽'));
+
+        sort.sort_by_column(&data, 2);
+        assert_eq!(sort.columns[0].direction, SortDirection::Descending);
         assert_eq!(displayed_column(&data, &sort, 0), ["c", "d", "a", "b"]);
         assert_eq!(sort.indicator(2), Some('▼'));
-        assert_eq!(sort.indicator(1), Some('△'));
-
-        sort.toggle_column(&data, 2);
-        assert_eq!(sort.indicator(2), Some('▲'));
         assert_eq!(sort.indicator(1), Some('△'));
     }
 
@@ -267,7 +282,7 @@ mod tests {
     fn reset_clears_the_stack_and_restores_file_order() {
         let data = data("name,number\na,2\nb,10\nc,1\n");
         let mut sort = SortState::new(data.rows.len());
-        sort.toggle_column(&data, 1);
+        sort.sort_by_column(&data, 1);
 
         sort.reset();
 
@@ -301,13 +316,13 @@ mod tests {
         let data = data("value\n-2\n10\n-10\n.5\n-.5\n0\n");
         let mut sort = SortState::new(data.rows.len());
 
-        sort.toggle_column(&data, 0);
+        sort.sort_by_column(&data, 0);
         assert_eq!(
             displayed_column(&data, &sort, 0),
             ["10", ".5", "0", "-.5", "-2", "-10"]
         );
 
-        sort.toggle_column(&data, 0);
+        sort.sort_by_column(&data, 0);
         assert_eq!(
             displayed_column(&data, &sort, 0),
             ["-10", "-2", "-.5", "0", ".5", "10"]
@@ -319,7 +334,7 @@ mod tests {
         let data = data("value\n2\n10\nx\n");
         let mut sort = SortState::new(data.rows.len());
 
-        sort.toggle_column(&data, 0);
+        sort.sort_by_column(&data, 0);
 
         assert!(!sort.columns[0].numeric);
         assert_eq!(displayed_column(&data, &sort, 0), ["x", "2", "10"]);

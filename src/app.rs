@@ -145,7 +145,7 @@ impl App {
             }
             KeyCode::Char('s' | 'S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(selected) = self.selected {
-                    self.sort.toggle_column(&self.data, selected.column);
+                    self.sort.sort_by_column(&self.data, selected.column);
                 }
                 return;
             }
@@ -253,7 +253,7 @@ impl App {
                 content_column >= *start && content_column <= start.saturating_add(*width)
             });
         if let Some(column) = clicked_column {
-            self.sort.toggle_column(&self.data, column);
+            self.sort.sort_by_column(&self.data, column);
         }
     }
 
@@ -766,6 +766,29 @@ mod tests {
 
         app.handle_event(click(2, 0));
         assert_eq!(displayed_column(&app, 0), ["a", "b"]);
+    }
+
+    #[test]
+    fn clicking_a_secondary_sort_promotes_it_before_the_next_click_toggles_it() {
+        let mut app = app("first,second\nb,x\na,y\nc,x\n", true, true);
+        app.set_viewport(20, 5);
+
+        app.handle_event(click(0, 0));
+        app.handle_event(click(7, 0));
+        assert_eq!(app.sort.sorted_columns(), [1, 0]);
+        assert_eq!(app.sort_indicator(0), Some('▽'));
+        assert_eq!(displayed_column(&app, 0), ["a", "c", "b"]);
+
+        app.handle_event(click(0, 0));
+        assert_eq!(app.sort.sorted_columns(), [0, 1]);
+        assert_eq!(app.sort_indicator(0), Some('▼'));
+        assert_eq!(app.sort_indicator(1), Some('▽'));
+        assert_eq!(displayed_column(&app, 0), ["c", "b", "a"]);
+
+        app.handle_event(click(0, 0));
+        assert_eq!(app.sort.sorted_columns(), [0, 1]);
+        assert_eq!(app.sort_indicator(0), Some('▲'));
+        assert_eq!(displayed_column(&app, 0), ["a", "b", "c"]);
     }
 
     #[test]

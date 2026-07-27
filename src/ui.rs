@@ -392,7 +392,9 @@ mod tests {
 
         app.handle_event(key(KeyCode::Left));
         app.handle_event(control_key('s'));
+        app.handle_event(control_key('s'));
         app.handle_event(key(KeyCode::Right));
+        app.handle_event(control_key('s'));
         app.handle_event(control_key('s'));
         terminal
             .draw(|frame| super::render(frame, &mut app))

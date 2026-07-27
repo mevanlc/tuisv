@@ -21,10 +21,12 @@ mouse wheels pan the viewport without changing the selection; Shift-wheel is a
 horizontal-scroll fallback.
 
 Click a column header or press Ctrl-S to sort the selected cell's column. The
-first sort is descending; repeating a sorted column toggles its direction, while
-newly sorted columns become primary and retain the existing columns as secondary
-sorts. `▼` and `▲` mark primary descending and ascending sorts; `▽` and `△` mark
-their secondary counterparts. Numeric columns containing only integers or
+first sort is descending. Sorting the primary column again toggles its direction;
+sorting a secondary column promotes it to primary without changing its direction,
+and the following sort toggles it. Newly sorted columns become primary and retain
+the existing columns as secondary sorts. `▼` and `▲` mark primary descending and
+ascending sorts; `▽` and `△` mark their secondary counterparts. Numeric columns
+containing only integers or
 decimals with optional leading minus signs are ordered numerically.
 
 Press Ctrl-F to show a filter row above the header. Each column has a one-line
