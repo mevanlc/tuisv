@@ -42,6 +42,10 @@ impl SortState {
         self.row_order.get(displayed_row).copied()
     }
 
+    pub(crate) fn row_count(&self) -> usize {
+        self.row_order.len()
+    }
+
     pub(crate) fn indicator(&self, column: usize) -> Option<char> {
         self.columns
             .iter()
@@ -88,9 +92,12 @@ impl SortState {
 
     pub(crate) fn reset(&mut self) {
         self.columns.clear();
-        for (row, original_row) in self.row_order.iter_mut().enumerate() {
-            *original_row = row;
-        }
+        self.row_order.sort_unstable();
+    }
+
+    pub(crate) fn replace_rows(&mut self, row_indices: Vec<usize>, data: &CsvData) {
+        self.row_order = row_indices;
+        self.apply(data);
     }
 
     fn apply(&mut self, data: &CsvData) {

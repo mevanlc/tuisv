@@ -25,8 +25,18 @@ first sort is descending; repeating a sorted column toggles its direction, while
 newly sorted columns become primary and retain the existing columns as secondary
 sorts. `▼` and `▲` mark primary descending and ascending sorts; `▽` and `△` mark
 their secondary counterparts. Numeric columns containing only integers or
-decimals with optional leading minus signs are ordered numerically. Press Ctrl-R
-to clear all sorting and restore file order. Press `q`, `Q`, or Ctrl-C to exit.
+decimals with optional leading minus signs are ordered numerically.
+
+Press Ctrl-F to show a filter row above the header. Each column has a one-line
+`fancy-regex` field; Tab and Shift-Tab move between fields, and a mouse click
+focuses a field. Nonempty fields are combined with AND and update automatically
+after a short debounce on a background worker. Invalid expressions are shown in
+red and match no rows until corrected. Ctrl-F hides the fields and removes the
+filtering while remembering their values; showing the row again reapplies them.
+
+Press Ctrl-R to clear all sorting and filter values, restore file order, and
+cancel an active filter. Press `q` or `Q` to exit while the filter row is hidden;
+Ctrl-C exits at any time.
 
 The file is read fully into memory as UTF-8 CSV. Embedded control characters
 are shown as escapes so each record occupies one terminal row.

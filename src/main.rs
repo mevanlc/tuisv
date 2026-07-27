@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod data;
+mod filter;
 mod sort;
 mod ui;
 

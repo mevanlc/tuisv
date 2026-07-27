@@ -1,5 +1,6 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -37,6 +38,22 @@ fn column_style(column: usize, selected: bool) -> Style {
     }
 }
 
+fn filter_style(active: bool, error: bool, processing: bool) -> Style {
+    let foreground = if error {
+        Color::LightRed
+    } else if processing {
+        Color::Yellow
+    } else {
+        Color::White
+    };
+    let background = if active {
+        Color::Rgb(55, 55, 55)
+    } else {
+        Color::Rgb(28, 28, 28)
+    };
+    Style::new().fg(foreground).bg(background)
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     app.set_viewport(area.width, area.height);
@@ -44,14 +61,22 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    let mut screen_row = 0usize;
+    if app.filter.is_visible() {
+        render_filter_bar(frame, row_area(area, screen_row), app);
+        screen_row += 1;
+    }
+
     if app.data.header.is_none() && app.data.rows.is_empty() {
-        Paragraph::new("Empty CSV").render(area, frame.buffer_mut());
+        if screen_row < usize::from(area.height) {
+            Paragraph::new("Empty CSV").render(row_area(area, screen_row), frame.buffer_mut());
+        }
         return;
     }
 
-    let mut screen_row = 0usize;
     if app.sticky_header
         && let Some(header) = &app.data.header
+        && screen_row < usize::from(area.height)
     {
         render_record(
             frame,
@@ -97,6 +122,64 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             app.column_offset,
             Style::default(),
         );
+    }
+}
+
+fn render_filter_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if area.is_empty() {
+        return;
+    }
+
+    let base_style = filter_style(false, false, false);
+    frame.buffer_mut().set_style(area, base_style);
+    let active_column = app.filter.active_column();
+    let processing = app.filter.is_processing();
+    let horizontal_offset = app.column_offset;
+    let viewport_start = horizontal_offset;
+    let viewport_end = viewport_start.saturating_add(usize::from(area.width));
+
+    for column in 0..app.data.column_count() {
+        let column_start = app.data.column_starts[column];
+        let column_width = app.data.widths[column];
+        let column_end = column_start.saturating_add(column_width);
+        let visible_start = column_start.max(viewport_start);
+        let visible_end = column_end.min(viewport_end);
+        let active = column == active_column;
+        let style = filter_style(active, app.filter.has_error(column), processing && active);
+
+        if visible_start < visible_end {
+            let local_width = u16::try_from(column_width).unwrap_or(u16::MAX);
+            let local_area = Rect::new(0, 0, local_width, 1);
+            let mut local = Buffer::empty(local_area);
+            if let Some(editor) = app.filter.editor_mut(column) {
+                editor.set_style(style);
+                editor.set_cursor_line_style(Style::default());
+                editor.set_cursor_style(if active {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                });
+                (&*editor).render(local_area, &mut local);
+            }
+
+            for content_column in visible_start..visible_end {
+                let source_x = u16::try_from(content_column - column_start).unwrap_or(u16::MAX);
+                let target_x = area.x.saturating_add(
+                    u16::try_from(content_column - viewport_start).unwrap_or(u16::MAX),
+                );
+                frame.buffer_mut()[(target_x, area.y)] = local[(source_x, 0)].clone();
+            }
+        }
+
+        let separator_column = column_end.saturating_add(1);
+        if (viewport_start..viewport_end).contains(&separator_column) {
+            let target_x = area.x.saturating_add(
+                u16::try_from(separator_column - viewport_start).unwrap_or(u16::MAX),
+            );
+            frame.buffer_mut()[(target_x, area.y)]
+                .set_symbol("│")
+                .set_style(style.fg(Color::Gray));
+        }
     }
 }
 
@@ -316,6 +399,31 @@ mod tests {
             .unwrap();
         assert_eq!(terminal.backend().buffer()[(5, 0)].symbol(), "△");
         assert_eq!(terminal.backend().buffer()[(13, 0)].symbol(), "▲");
+    }
+
+    #[test]
+    fn filter_bar_renders_textareas_above_the_shifted_header() {
+        let data =
+            CsvData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
+        let mut app = App::new(data, true);
+        app.handle_event(control_key('f'));
+        app.handle_event(key(KeyCode::Char('^')));
+        app.handle_event(key(KeyCode::Char('A')));
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(0, 0)].symbol(), "^");
+        assert_eq!(buffer[(1, 0)].symbol(), "A");
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(55, 55, 55));
+        assert_eq!(buffer[(6, 0)].symbol(), "│");
+        assert_eq!(buffer[(0, 1)].symbol(), "n");
+        assert_eq!(buffer[(0, 1)].bg, Color::DarkGray);
+        assert_eq!(buffer[(0, 2)].symbol(), "A");
     }
 
     #[test]

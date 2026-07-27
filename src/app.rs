@@ -1,4 +1,10 @@
-use std::{io, io::stdout, panic};
+use std::{
+    io,
+    io::stdout,
+    panic,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     event::{
@@ -9,10 +15,16 @@ use crossterm::{
 };
 use ratatui::DefaultTerminal;
 
-use crate::{data::CsvData, sort::SortState, ui};
+use crate::{
+    data::CsvData,
+    filter::{FilterState, FilterUpdate},
+    sort::SortState,
+    ui,
+};
 
 const VERTICAL_SCROLL_AMOUNT: usize = 3;
 const HORIZONTAL_SCROLL_AMOUNT: usize = 4;
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellPosition {
@@ -35,6 +47,7 @@ pub struct App {
     pub row_offset: usize,
     pub column_offset: usize,
     sort: SortState,
+    pub(crate) filter: FilterState,
     column_resize_drag: Option<ColumnResizeDrag>,
     viewport_width: usize,
     viewport_height: usize,
@@ -46,6 +59,7 @@ impl App {
         let selected = (!data.rows.is_empty() && data.column_count() > 0)
             .then_some(CellPosition { row: 0, column: 0 });
         let sort = SortState::new(data.rows.len());
+        let filter = FilterState::new(data.column_count());
         Self {
             data,
             sticky_header,
@@ -53,6 +67,7 @@ impl App {
             row_offset: 0,
             column_offset: 0,
             sort,
+            filter,
             column_resize_drag: None,
             viewport_width: 0,
             viewport_height: 0,
@@ -79,16 +94,24 @@ impl App {
         }
     }
 
-    pub fn scrollable_height(&self) -> usize {
-        if self.sticky_header && self.data.header.is_some() {
-            self.viewport_height.saturating_sub(1)
-        } else {
-            self.viewport_height
+    pub fn tick(&mut self) {
+        self.tick_at(Instant::now());
+    }
+
+    fn tick_at(&mut self, now: Instant) {
+        if let Some(update) = self.filter.tick(Arc::clone(&self.data.rows), now) {
+            self.apply_filter_update(update);
         }
     }
 
+    pub fn scrollable_height(&self) -> usize {
+        let fixed_rows = usize::from(self.filter.is_visible())
+            + usize::from(self.sticky_header && self.data.header.is_some());
+        self.viewport_height.saturating_sub(fixed_rows)
+    }
+
     pub fn scrollable_row_count(&self) -> usize {
-        self.data.rows.len() + usize::from(!self.sticky_header && self.data.header.is_some())
+        self.sort.row_count() + usize::from(!self.sticky_header && self.data.header.is_some())
     }
 
     pub fn visual_row_for_data(&self, data_row: usize) -> usize {
@@ -112,22 +135,53 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
+                return;
+            }
+            KeyCode::Char('f' | 'F') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_filter();
+                return;
+            }
             KeyCode::Char('s' | 'S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(selected) = self.selected {
                     self.sort.toggle_column(&self.data, selected.column);
                 }
+                return;
             }
             KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.sort.reset();
+                self.reset_sort_and_filters();
+                return;
             }
-            KeyCode::Char('q' | 'Q') => self.quit = true,
             KeyCode::Left if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
                 self.resize_selected_column(-1);
+                return;
             }
             KeyCode::Right if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
                 self.resize_selected_column(1);
+                return;
             }
+            _ => {}
+        }
+
+        if self.filter.is_visible() {
+            match key.code {
+                KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.move_filter_focus(-1);
+                }
+                KeyCode::Tab => self.move_filter_focus(1),
+                KeyCode::BackTab => self.move_filter_focus(-1),
+                KeyCode::Enter | KeyCode::Char('\n' | '\r') => {}
+                KeyCode::Char('m' | 'M') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+                _ => {
+                    self.filter.input(key, Instant::now());
+                }
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('q' | 'Q') => self.quit = true,
             KeyCode::Up => self.move_selection(-1, 0),
             KeyCode::Down => self.move_selection(1, 0),
             KeyCode::Left => self.move_selection(0, -1),
@@ -139,7 +193,9 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(column) = self.resize_handle_at(mouse.column, mouse.row) {
+                if self.activate_filter_at(mouse.column, mouse.row) {
+                    self.column_resize_drag = None;
+                } else if let Some(column) = self.resize_handle_at(mouse.column, mouse.row) {
                     self.column_resize_drag = Some(ColumnResizeDrag {
                         column,
                         initial_screen_column: mouse.column,
@@ -213,13 +269,36 @@ impl App {
     }
 
     fn header_content_column(&self, screen_column: u16, screen_row: u16) -> Option<usize> {
+        let header_screen_row = u16::from(self.filter.is_visible());
         (self.data.header.is_some()
             && (self.sticky_header || self.row_offset == 0)
-            && screen_row == 0)
+            && screen_row == header_screen_row)
             .then(|| {
                 self.column_offset
                     .saturating_add(usize::from(screen_column))
             })
+    }
+
+    fn activate_filter_at(&mut self, screen_column: u16, screen_row: u16) -> bool {
+        if !self.filter.is_visible() || screen_row != 0 {
+            return false;
+        }
+        let content_column = self
+            .column_offset
+            .saturating_add(usize::from(screen_column));
+        let Some(column) = self
+            .data
+            .column_starts
+            .iter()
+            .zip(&self.data.widths)
+            .position(|(start, width)| {
+                content_column >= *start && content_column < start.saturating_add(*width)
+            })
+        else {
+            return false;
+        };
+        self.activate_filter_column(column);
+        true
     }
 
     fn resize_selected_column(&mut self, delta: isize) {
@@ -253,7 +332,7 @@ impl App {
         selected.row = selected
             .row
             .saturating_add_signed(row_delta)
-            .min(self.data.rows.len().saturating_sub(1));
+            .min(self.sort.row_count().saturating_sub(1));
         selected.column = selected
             .column
             .saturating_add_signed(column_delta)
@@ -264,6 +343,79 @@ impl App {
 
     fn pan_vertical(&mut self, amount: isize) {
         self.row_offset = self.row_offset.saturating_add_signed(amount);
+        self.clamp_offsets();
+    }
+
+    fn toggle_filter(&mut self) {
+        let selected_column = self.selected.map(|selected| selected.column);
+        let update = self
+            .filter
+            .toggle(Arc::clone(&self.data.rows), selected_column);
+        if let Some(update) = update {
+            self.apply_filter_update(update);
+        }
+        if self.filter.is_visible() {
+            self.activate_filter_column(self.filter.active_column());
+        }
+    }
+
+    fn reset_sort_and_filters(&mut self) {
+        self.sort.reset();
+        let update = self.filter.reset(&self.data.rows);
+        self.apply_filter_update(update);
+    }
+
+    fn move_filter_focus(&mut self, delta: isize) {
+        self.filter.move_active_column(delta);
+        self.activate_filter_column(self.filter.active_column());
+    }
+
+    fn activate_filter_column(&mut self, column: usize) {
+        self.filter.activate_column(column);
+        if let Some(selected) = &mut self.selected {
+            selected.column = column;
+        }
+        self.ensure_column_visible(column);
+    }
+
+    fn apply_filter_update(&mut self, update: FilterUpdate) {
+        self.sort.replace_rows(update.row_indices, &self.data);
+        self.reconcile_selection();
+        self.ensure_selection_visible();
+        self.clamp_offsets();
+    }
+
+    fn reconcile_selection(&mut self) {
+        if self.sort.row_count() == 0 || self.data.column_count() == 0 {
+            self.selected = None;
+            return;
+        }
+        let row = self
+            .selected
+            .map_or(0, |selected| selected.row.min(self.sort.row_count() - 1));
+        let column = self
+            .selected
+            .map_or(self.filter.active_column(), |selected| {
+                selected.column.min(self.data.column_count() - 1)
+            });
+        self.selected = Some(CellPosition { row, column });
+    }
+
+    fn ensure_column_visible(&mut self, column: usize) {
+        let Some((&column_start, &column_width)) = self
+            .data
+            .column_starts
+            .get(column)
+            .zip(self.data.widths.get(column))
+        else {
+            return;
+        };
+        let column_end = column_start.saturating_add(column_width);
+        if column_start < self.column_offset || column_width > self.viewport_width {
+            self.column_offset = column_start;
+        } else if self.viewport_width > 0 && column_end > self.column_offset + self.viewport_width {
+            self.column_offset = column_end - self.viewport_width;
+        }
         self.clamp_offsets();
     }
 
@@ -331,8 +483,11 @@ impl TerminalSession {
 
     pub fn run(&mut self, app: &mut App) -> io::Result<()> {
         while !app.should_quit() {
+            app.tick();
             self.terminal.draw(|frame| ui::render(frame, app))?;
-            app.handle_event(event::read()?);
+            if event::poll(EVENT_POLL_INTERVAL)? {
+                app.handle_event(event::read()?);
+            }
         }
         Ok(())
     }
@@ -387,9 +542,25 @@ mod tests {
     }
 
     fn displayed_column(app: &App, column: usize) -> Vec<String> {
-        (0..app.data.rows.len())
+        (0..app.sort.row_count())
             .map(|row| app.displayed_row(row).unwrap()[column].clone())
             .collect()
+    }
+
+    fn send_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.handle_event(key(KeyCode::Char(character)));
+        }
+    }
+
+    fn wait_for_filtered_rows(app: &mut App, expected: usize) {
+        app.tick_at(Instant::now() + crate::filter::FILTER_DEBOUNCE + Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while app.sort.row_count() != expected || app.filter.is_processing() {
+            assert!(Instant::now() < deadline, "filter worker did not settle");
+            app.tick();
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
@@ -466,6 +637,72 @@ mod tests {
     }
 
     #[test]
+    fn control_f_filters_with_fancy_regexes_across_columns_and_remembers_values() {
+        let mut app = app(
+            "name,city\nAda,London\nGrace,Rome\nAlan,London\n",
+            true,
+            true,
+        );
+        app.set_viewport(30, 5);
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.filter.is_visible());
+        assert_eq!(app.scrollable_height(), 3);
+        send_text(&mut app, r"(?<=A)d");
+        app.handle_event(key(KeyCode::Tab));
+        send_text(&mut app, "London");
+        assert_eq!(app.selected.unwrap().column, 1);
+
+        wait_for_filtered_rows(&mut app, 1);
+        assert_eq!(displayed_column(&app, 0), ["Ada"]);
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(!app.filter.is_visible());
+        assert_eq!(displayed_column(&app, 0), ["Ada", "Grace", "Alan"]);
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        wait_for_filtered_rows(&mut app, 1);
+        assert_eq!(displayed_column(&app, 0), ["Ada"]);
+    }
+
+    #[test]
+    fn q_edits_a_visible_filter_instead_of_quitting() {
+        let mut app = app("value\nq\nx\n", true, true);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        app.handle_event(key(KeyCode::Char('q')));
+        wait_for_filtered_rows(&mut app, 1);
+
+        assert!(!app.should_quit());
+        assert_eq!(displayed_column(&app, 0), ["q"]);
+    }
+
+    #[test]
+    fn control_r_clears_sort_and_filters_and_rejects_cancelled_results() {
+        let mut app = app("value\na\nc\nb\n", true, true);
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["c", "b", "a"]);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "^a$");
+        app.tick_at(Instant::now() + crate::filter::FILTER_DEBOUNCE + Duration::from_millis(5));
+
+        app.handle_event(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.sort.sorted_columns().is_empty());
+        assert_eq!(displayed_column(&app, 0), ["a", "c", "b"]);
+
+        let deadline = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < deadline {
+            app.tick();
+            std::thread::yield_now();
+        }
+        assert_eq!(displayed_column(&app, 0), ["a", "c", "b"]);
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["a", "c", "b"]);
+    }
+
+    #[test]
     fn control_shift_arrows_resize_the_selected_column_without_moving_selection() {
         let mut app = app("first,second\nabcdef,x\n", true, true);
         let selected = app.selected;
@@ -529,6 +766,21 @@ mod tests {
 
         app.handle_event(click(2, 0));
         assert_eq!(displayed_column(&app, 0), ["a", "b"]);
+    }
+
+    #[test]
+    fn filter_row_mouse_clicks_focus_fields_and_shift_header_hit_testing_down() {
+        let mut app = app("left,right\na,1\nb,2\n", true, true);
+        app.set_viewport(20, 4);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        app.handle_event(click(7, 0));
+        assert_eq!(app.filter.active_column(), 1);
+        assert!(app.sort.sorted_columns().is_empty());
+
+        app.handle_event(click(7, 1));
+        assert_eq!(app.sort.sorted_columns(), [1]);
+        assert_eq!(displayed_column(&app, 0), ["b", "a"]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, path::Path};
+use std::{fs::File, io::Read, path::Path, sync::Arc};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -7,7 +7,7 @@ pub const COLUMN_GAP: usize = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvData {
     pub header: Option<Vec<String>>,
-    pub rows: Vec<Vec<String>>,
+    pub rows: Arc<Vec<Vec<String>>>,
     pub widths: Vec<usize>,
     pub column_starts: Vec<usize>,
     pub content_width: usize,
@@ -54,7 +54,7 @@ impl CsvData {
 
         Ok(Self {
             header,
-            rows,
+            rows: Arc::new(rows),
             widths,
             column_starts,
             content_width,
@@ -149,7 +149,7 @@ mod tests {
         let data = CsvData::from_reader("a,b\nc,d\n".as_bytes(), false).unwrap();
 
         assert_eq!(data.header, None);
-        assert_eq!(data.rows, vec![vec!["a", "b"], vec!["c", "d"]]);
+        assert_eq!(data.rows.as_ref(), &vec![vec!["a", "b"], vec!["c", "d"]]);
     }
 
     #[test]
