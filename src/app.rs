@@ -1,0 +1,308 @@
+use std::{io, io::stdout, panic};
+
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
+    execute,
+};
+use ratatui::DefaultTerminal;
+
+use crate::{data::CsvData, ui};
+
+const VERTICAL_SCROLL_AMOUNT: usize = 3;
+const HORIZONTAL_SCROLL_AMOUNT: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellPosition {
+    pub row: usize,
+    pub column: usize,
+}
+
+#[derive(Debug)]
+pub struct App {
+    pub data: CsvData,
+    pub sticky_header: bool,
+    pub selected: Option<CellPosition>,
+    pub row_offset: usize,
+    pub column_offset: usize,
+    viewport_width: usize,
+    viewport_height: usize,
+    quit: bool,
+}
+
+impl App {
+    pub fn new(data: CsvData, sticky_header: bool) -> Self {
+        let selected = (!data.rows.is_empty() && data.column_count() > 0)
+            .then_some(CellPosition { row: 0, column: 0 });
+        Self {
+            data,
+            sticky_header,
+            selected,
+            row_offset: 0,
+            column_offset: 0,
+            viewport_width: 0,
+            viewport_height: 0,
+            quit: false,
+        }
+    }
+
+    pub fn set_viewport(&mut self, width: u16, height: u16) {
+        self.viewport_width = usize::from(width);
+        self.viewport_height = usize::from(height);
+        self.clamp_offsets();
+    }
+
+    pub fn should_quit(&self) -> bool {
+        self.quit
+    }
+
+    pub fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize(width, height) => self.set_viewport(width, height),
+            _ => {}
+        }
+    }
+
+    pub fn scrollable_height(&self) -> usize {
+        if self.sticky_header && self.data.header.is_some() {
+            self.viewport_height.saturating_sub(1)
+        } else {
+            self.viewport_height
+        }
+    }
+
+    pub fn scrollable_row_count(&self) -> usize {
+        self.data.rows.len() + usize::from(!self.sticky_header && self.data.header.is_some())
+    }
+
+    pub fn visual_row_for_data(&self, data_row: usize) -> usize {
+        data_row + usize::from(!self.sticky_header && self.data.header.is_some())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('q' | 'Q') => self.quit = true,
+            KeyCode::Up => self.move_selection(-1, 0),
+            KeyCode::Down => self.move_selection(1, 0),
+            KeyCode::Left => self.move_selection(0, -1),
+            KeyCode::Right => self.move_selection(0, 1),
+            _ => {}
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.pan_horizontal(-(HORIZONTAL_SCROLL_AMOUNT as isize));
+            }
+            MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.pan_horizontal(HORIZONTAL_SCROLL_AMOUNT as isize);
+            }
+            MouseEventKind::ScrollUp => self.pan_vertical(-(VERTICAL_SCROLL_AMOUNT as isize)),
+            MouseEventKind::ScrollDown => self.pan_vertical(VERTICAL_SCROLL_AMOUNT as isize),
+            MouseEventKind::ScrollLeft => {
+                self.pan_horizontal(-(HORIZONTAL_SCROLL_AMOUNT as isize));
+            }
+            MouseEventKind::ScrollRight => {
+                self.pan_horizontal(HORIZONTAL_SCROLL_AMOUNT as isize);
+            }
+            _ => {}
+        }
+    }
+
+    fn move_selection(&mut self, row_delta: isize, column_delta: isize) {
+        let Some(mut selected) = self.selected else {
+            return;
+        };
+
+        selected.row = selected
+            .row
+            .saturating_add_signed(row_delta)
+            .min(self.data.rows.len().saturating_sub(1));
+        selected.column = selected
+            .column
+            .saturating_add_signed(column_delta)
+            .min(self.data.column_count().saturating_sub(1));
+        self.selected = Some(selected);
+        self.ensure_selection_visible();
+    }
+
+    fn pan_vertical(&mut self, amount: isize) {
+        self.row_offset = self.row_offset.saturating_add_signed(amount);
+        self.clamp_offsets();
+    }
+
+    fn pan_horizontal(&mut self, amount: isize) {
+        self.column_offset = self.column_offset.saturating_add_signed(amount);
+        self.clamp_offsets();
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+
+        let visible_height = self.scrollable_height();
+        let visual_row = self.visual_row_for_data(selected.row);
+        if visual_row < self.row_offset {
+            self.row_offset = visual_row;
+        } else if visible_height > 0 && visual_row >= self.row_offset + visible_height {
+            self.row_offset = visual_row + 1 - visible_height;
+        }
+
+        let column_start = self.data.column_starts[selected.column];
+        let column_width = self.data.widths[selected.column];
+        let column_end = column_start.saturating_add(column_width);
+        if column_start < self.column_offset || column_width > self.viewport_width {
+            self.column_offset = column_start;
+        } else if self.viewport_width > 0 && column_end > self.column_offset + self.viewport_width {
+            self.column_offset = column_end - self.viewport_width;
+        }
+
+        self.clamp_offsets();
+    }
+
+    fn clamp_offsets(&mut self) {
+        let maximum_row_offset = self
+            .scrollable_row_count()
+            .saturating_sub(self.scrollable_height());
+        self.row_offset = self.row_offset.min(maximum_row_offset);
+
+        let maximum_column_offset = self.data.content_width.saturating_sub(self.viewport_width);
+        self.column_offset = self.column_offset.min(maximum_column_offset);
+    }
+}
+
+pub struct TerminalSession {
+    terminal: DefaultTerminal,
+}
+
+impl TerminalSession {
+    pub fn start() -> io::Result<Self> {
+        let terminal = ratatui::try_init()?;
+        if let Err(error) = execute!(stdout(), EnableMouseCapture) {
+            ratatui::restore();
+            return Err(error);
+        }
+
+        let previous_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
+            let _ = execute!(stdout(), DisableMouseCapture);
+            previous_hook(panic_info);
+        }));
+
+        Ok(Self { terminal })
+    }
+
+    pub fn run(&mut self, app: &mut App) -> io::Result<()> {
+        while !app.should_quit() {
+            self.terminal.draw(|frame| ui::render(frame, app))?;
+            app.handle_event(event::read()?);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = execute!(stdout(), DisableMouseCapture);
+        ratatui::restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(csv: &str, has_header: bool, sticky_header: bool) -> App {
+        App::new(
+            CsvData::from_reader(csv.as_bytes(), has_header).unwrap(),
+            sticky_header,
+        )
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn wheel(kind: MouseEventKind, modifiers: KeyModifiers) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers,
+        })
+    }
+
+    #[test]
+    fn arrows_clamp_and_scroll_at_viewport_edges() {
+        let mut app = app("h1,h2,h3\na,b,c\nd,e,f\ng,h,i\n", true, true);
+        app.set_viewport(3, 3);
+
+        app.handle_event(key(KeyCode::Down));
+        app.handle_event(key(KeyCode::Down));
+        app.handle_event(key(KeyCode::Down));
+        assert_eq!(app.selected.unwrap().row, 2);
+        assert_eq!(app.row_offset, 1);
+
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.selected.unwrap().column, 2);
+        assert_eq!(app.column_offset, 7);
+
+        app.handle_event(key(KeyCode::Left));
+        app.handle_event(key(KeyCode::Left));
+        assert_eq!(app.column_offset, 0);
+    }
+
+    #[test]
+    fn mouse_pans_without_moving_selection() {
+        let mut app = app("header-a,header-b\n1,2\n3,4\n5,6\n7,8\n9,10\n", true, true);
+        app.set_viewport(5, 3);
+        let selected = app.selected;
+
+        app.handle_event(wheel(MouseEventKind::ScrollDown, KeyModifiers::NONE));
+        app.handle_event(wheel(MouseEventKind::ScrollRight, KeyModifiers::NONE));
+
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.row_offset, 3);
+        assert_eq!(app.column_offset, 4);
+    }
+
+    #[test]
+    fn shift_vertical_wheel_pans_horizontally() {
+        let mut app = app("long-header,second-header\na,b\n", true, true);
+        app.set_viewport(5, 3);
+
+        app.handle_event(wheel(MouseEventKind::ScrollDown, KeyModifiers::SHIFT));
+        assert_eq!(app.column_offset, 4);
+        assert_eq!(app.row_offset, 0);
+    }
+
+    #[test]
+    fn scrolling_header_participates_in_visual_rows() {
+        let mut app = app("header\na\nb\nc\n", true, false);
+        app.set_viewport(10, 2);
+        app.handle_event(wheel(MouseEventKind::ScrollDown, KeyModifiers::NONE));
+
+        assert_eq!(app.scrollable_row_count(), 4);
+        assert_eq!(app.row_offset, 2);
+        assert_eq!(app.visual_row_for_data(0), 1);
+    }
+
+    #[test]
+    fn empty_data_has_no_selection() {
+        let app = app("header\n", true, true);
+        assert_eq!(app.selected, None);
+    }
+}
