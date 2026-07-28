@@ -46,6 +46,10 @@ impl SortState {
         self.row_order.len()
     }
 
+    pub(crate) fn is_active(&self) -> bool {
+        !self.columns.is_empty()
+    }
+
     pub(crate) fn indicator(&self, column: usize) -> Option<char> {
         self.columns
             .iter()

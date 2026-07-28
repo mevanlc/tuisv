@@ -48,6 +48,8 @@ pub struct App {
     pub column_offset: usize,
     sort: SortState,
     pub(crate) filter: FilterState,
+    help_visible: bool,
+    help_scroll: usize,
     column_resize_drag: Option<ColumnResizeDrag>,
     viewport_width: usize,
     viewport_height: usize,
@@ -68,6 +70,8 @@ impl App {
             column_offset: 0,
             sort,
             filter,
+            help_visible: false,
+            help_scroll: 0,
             column_resize_drag: None,
             viewport_width: 0,
             viewport_height: 0,
@@ -78,6 +82,10 @@ impl App {
     pub fn set_viewport(&mut self, width: u16, height: u16) {
         self.viewport_width = usize::from(width);
         self.viewport_height = usize::from(height);
+        self.help_scroll = self.help_scroll.min(ui::help_max_scroll(
+            self.viewport_width,
+            self.viewport_height,
+        ));
         self.clamp_offsets();
     }
 
@@ -129,16 +137,44 @@ impl App {
         self.sort.indicator(column)
     }
 
+    pub(crate) fn help_visible(&self) -> bool {
+        self.help_visible
+    }
+
+    pub(crate) fn help_scroll(&self) -> usize {
+        self.help_scroll
+    }
+
+    pub(crate) fn clamp_help_scroll(&mut self, maximum: usize) {
+        self.help_scroll = self.help_scroll.min(maximum);
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
 
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.quit = true;
-                return;
+        if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
+            return;
+        }
+
+        if self.help_visible {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => self.help_visible = false,
+                KeyCode::Up | KeyCode::Left => self.scroll_help(-1),
+                KeyCode::Down | KeyCode::Right => self.scroll_help(1),
+                _ => {}
             }
+            return;
+        }
+
+        if key.code == KeyCode::Esc {
+            self.go_back();
+            return;
+        }
+
+        match key.code {
             KeyCode::Char('f' | 'F') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_filter();
                 return;
@@ -164,19 +200,37 @@ impl App {
             _ => {}
         }
 
-        if self.filter.is_visible() {
+        if self.filter.is_editing() {
             match key.code {
+                KeyCode::Char('a' | 'A') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.filter.move_to_line_start();
+                }
                 KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                     self.move_filter_focus(-1);
                 }
                 KeyCode::Tab => self.move_filter_focus(1),
                 KeyCode::BackTab => self.move_filter_focus(-1),
-                KeyCode::Enter | KeyCode::Char('\n' | '\r') => {}
-                KeyCode::Char('m' | 'M') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+                KeyCode::Enter | KeyCode::Char('\n' | '\r') => self.finish_filter_editing(),
+                KeyCode::Char('m' | 'M') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.finish_filter_editing();
+                }
                 _ => {
                     self.filter.input(key, Instant::now());
                 }
             }
+            return;
+        }
+
+        if key.code == KeyCode::Char('?') {
+            self.help_visible = true;
+            self.help_scroll = 0;
+            return;
+        }
+
+        if self.filter.is_visible() && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            let backwards =
+                key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+            self.move_filter_focus(if backwards { -1 } else { 1 });
             return;
         }
 
@@ -191,6 +245,9 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.help_visible {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.activate_filter_at(mouse.column, mouse.row) {
@@ -297,7 +354,7 @@ impl App {
         else {
             return false;
         };
-        self.activate_filter_column(column);
+        self.focus_filter_column(column);
         true
     }
 
@@ -365,9 +422,35 @@ impl App {
         self.apply_filter_update(update);
     }
 
+    fn go_back(&mut self) {
+        if self.filter.is_visible() {
+            self.toggle_filter();
+        } else if self.sort.is_active() {
+            self.sort.reset();
+        } else {
+            self.quit = true;
+        }
+    }
+
+    fn scroll_help(&mut self, delta: isize) {
+        let maximum = ui::help_max_scroll(self.viewport_width, self.viewport_height);
+        self.help_scroll = self.help_scroll.saturating_add_signed(delta).min(maximum);
+    }
+
+    fn finish_filter_editing(&mut self) {
+        if let Some(update) = self.filter.finish_editing(Arc::clone(&self.data.rows)) {
+            self.apply_filter_update(update);
+        }
+    }
+
     fn move_filter_focus(&mut self, delta: isize) {
         self.filter.move_active_column(delta);
-        self.activate_filter_column(self.filter.active_column());
+        self.focus_filter_column(self.filter.active_column());
+    }
+
+    fn focus_filter_column(&mut self, column: usize) {
+        self.filter.focus_column(column);
+        self.activate_filter_column(column);
     }
 
     fn activate_filter_column(&mut self, column: usize) {
@@ -555,6 +638,10 @@ mod tests {
 
     fn wait_for_filtered_rows(app: &mut App, expected: usize) {
         app.tick_at(Instant::now() + crate::filter::FILTER_DEBOUNCE + Duration::from_millis(5));
+        wait_for_filter_worker(app, expected);
+    }
+
+    fn wait_for_filter_worker(app: &mut App, expected: usize) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while app.sort.row_count() != expected || app.filter.is_processing() {
             assert!(Instant::now() < deadline, "filter worker did not settle");
@@ -675,6 +762,87 @@ mod tests {
 
         assert!(!app.should_quit());
         assert_eq!(displayed_column(&app, 0), ["q"]);
+    }
+
+    #[test]
+    fn enter_commits_filter_editing_and_releases_plain_keys() {
+        let mut app = app("value\na\nb\n", true, true);
+        app.set_viewport(30, 6);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "^a$");
+
+        app.handle_event(key(KeyCode::Enter));
+        assert!(!app.filter.is_editing());
+        wait_for_filter_worker(&mut app, 1);
+        assert_eq!(displayed_column(&app, 0), ["a"]);
+
+        app.handle_event(key(KeyCode::Char('?')));
+        assert!(app.help_visible());
+        app.handle_event(key(KeyCode::Esc));
+        assert!(!app.help_visible());
+        assert!(app.filter.is_visible());
+    }
+
+    #[test]
+    fn question_mark_is_filter_text_while_an_editor_has_focus() {
+        let mut app = app("value\na\n", true, true);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        app.handle_event(key(KeyCode::Char('?')));
+
+        assert!(!app.help_visible());
+        assert_eq!(app.filter.pattern(0), Some("?"));
+    }
+
+    #[test]
+    fn control_a_moves_to_the_start_of_the_filter_line() {
+        let mut app = app("value\na\n", true, true);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "abc");
+
+        app.handle_event(modified_key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        send_text(&mut app, "z");
+
+        assert_eq!(app.filter.pattern(0), Some("zabc"));
+    }
+
+    #[test]
+    fn escape_closes_filter_then_resets_sort_then_exits() {
+        let mut app = app("value\na\nb\n", true, true);
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        app.handle_event(key(KeyCode::Esc));
+        assert!(!app.filter.is_visible());
+        assert!(app.sort.is_active());
+        assert!(!app.should_quit());
+
+        app.handle_event(key(KeyCode::Esc));
+        assert!(!app.sort.is_active());
+        assert_eq!(displayed_column(&app, 0), ["a", "b"]);
+        assert!(!app.should_quit());
+
+        app.handle_event(key(KeyCode::Esc));
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn help_is_modal_and_arrow_scrollable() {
+        let mut app = app("value\na\nb\n", true, true);
+        app.set_viewport(40, 8);
+        let selected = app.selected;
+
+        app.handle_event(key(KeyCode::Char('?')));
+        assert!(app.help_visible());
+        app.handle_event(key(KeyCode::Down));
+        assert_eq!(app.help_scroll(), 1);
+        assert_eq!(app.selected, selected);
+        app.handle_event(key(KeyCode::Up));
+        assert_eq!(app.help_scroll(), 0);
+
+        app.handle_event(key(KeyCode::Char('?')));
+        assert!(!app.help_visible());
+        assert!(!app.should_quit());
     }
 
     #[test]

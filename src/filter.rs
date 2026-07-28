@@ -10,7 +10,7 @@ use std::{
 
 use crossterm::event::KeyEvent;
 use fancy_regex::RegexBuilder;
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 
 pub(crate) const FILTER_DEBOUNCE: Duration = Duration::from_millis(175);
 const REGEX_BACKTRACK_LIMIT: usize = 1_000_000;
@@ -33,6 +33,7 @@ pub(crate) struct FilterUpdate {
 #[derive(Debug)]
 pub(crate) struct FilterState {
     visible: bool,
+    editing: bool,
     editors: Vec<TextArea<'static>>,
     active_column: usize,
     pending_since: Option<Instant>,
@@ -49,6 +50,7 @@ impl FilterState {
         let (result_tx, result_rx) = mpsc::channel();
         Self {
             visible: false,
+            editing: false,
             editors: (0..column_count).map(|_| new_editor()).collect(),
             active_column: 0,
             pending_since: None,
@@ -69,6 +71,10 @@ impl FilterState {
         self.active_cancel.is_some()
     }
 
+    pub(crate) fn is_editing(&self) -> bool {
+        self.editing
+    }
+
     pub(crate) fn active_column(&self) -> usize {
         self.active_column
     }
@@ -77,6 +83,11 @@ impl FilterState {
         if !self.editors.is_empty() {
             self.active_column = column.min(self.editors.len() - 1);
         }
+    }
+
+    pub(crate) fn focus_column(&mut self, column: usize) {
+        self.activate_column(column);
+        self.editing = !self.editors.is_empty();
     }
 
     pub(crate) fn move_active_column(&mut self, delta: isize) {
@@ -98,6 +109,9 @@ impl FilterState {
     }
 
     pub(crate) fn input(&mut self, key: KeyEvent, now: Instant) -> bool {
+        if !self.editing {
+            return false;
+        }
         let Some(editor) = self.editors.get_mut(self.active_column) else {
             return false;
         };
@@ -108,6 +122,14 @@ impl FilterState {
         modified
     }
 
+    pub(crate) fn move_to_line_start(&mut self) {
+        if self.editing
+            && let Some(editor) = self.editors.get_mut(self.active_column)
+        {
+            editor.move_cursor(CursorMove::Head);
+        }
+    }
+
     pub(crate) fn toggle(
         &mut self,
         rows: Rows,
@@ -115,6 +137,7 @@ impl FilterState {
     ) -> Option<FilterUpdate> {
         if self.visible {
             self.visible = false;
+            self.editing = false;
             self.invalidate_active_work();
             self.processing_patterns = None;
             return Some(FilterUpdate {
@@ -126,6 +149,16 @@ impl FilterState {
         if let Some(column) = selected_column {
             self.activate_column(column);
         }
+        self.editing = !self.editors.is_empty();
+        self.pending_since = None;
+        self.start_current_patterns(rows)
+    }
+
+    pub(crate) fn finish_editing(&mut self, rows: Rows) -> Option<FilterUpdate> {
+        if !self.visible || !self.editing {
+            return None;
+        }
+        self.editing = false;
         self.pending_since = None;
         self.start_current_patterns(rows)
     }
@@ -198,6 +231,14 @@ impl FilterState {
             .iter()
             .map(|editor| editor.lines().first().cloned().unwrap_or_default())
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pattern(&self, column: usize) -> Option<&str> {
+        self.editors
+            .get(column)
+            .and_then(|editor| editor.lines().first())
+            .map(String::as_str)
     }
 
     fn invalidate_active_work(&mut self) {
