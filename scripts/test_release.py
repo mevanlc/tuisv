@@ -323,6 +323,38 @@ class ProjectTest(unittest.TestCase):
             str(Path("dist/SHA256SUMS")),
         )
 
+    def test_staging_waits_for_created_draft_without_creating_twice(self):
+        self.make_bundle()
+        draft = {"draft": True, "prerelease": False}
+        with (
+            mock.patch.object(release, "assert_publication", return_value="v0.1.0"),
+            mock.patch.object(
+                release, "release_state", side_effect=[None, None, None, draft, draft]
+            ),
+            mock.patch.object(release, "verify_remote_assets", return_value=set()),
+            mock.patch.object(release, "repository", return_value="owner/widget"),
+            mock.patch.object(release, "run") as command,
+            mock.patch.object(release.time, "sleep") as sleep,
+        ):
+            release.stage()
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[:3], ("gh", "release", "create"))
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_staging_visibility_retry_is_bounded(self):
+        self.make_bundle()
+        with (
+            mock.patch.object(release, "assert_publication", return_value="v0.1.0"),
+            mock.patch.object(release, "release_state", return_value=None) as state,
+            mock.patch.object(release, "repository", return_value="owner/widget"),
+            mock.patch.object(release, "run") as command,
+            mock.patch.object(release.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(ValueError, "Created draft is not visible"):
+                release.stage()
+        command.assert_called_once()
+        self.assertEqual(state.call_count, 7)
+
     def test_server_digest_is_checked_without_redownloading(self):
         self.make_bundle()
         name = "widget-0.1.0.crate"
