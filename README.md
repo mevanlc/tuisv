@@ -4,6 +4,30 @@
 in the alternate screen, sizes columns to their contents, and keeps the selected
 cell visible during keyboard navigation.
 
+## Install
+
+Install from crates.io with Rust and Cargo:
+
+```sh
+cargo install tuisv --locked
+```
+
+Prebuilt binaries are available on the [GitHub releases page](https://github.com/mevanlc/tuisv/releases)
+for Linux (x64/ARM64, static musl), macOS (x64/ARM64), Windows (x64/ARM64), and
+Android ARM64. Extract the archive and put `tuisv` (or `tuisv.exe`) on your PATH.
+Android builds target API 24 or later and are intended for terminal environments
+such as Termux; macOS builds target macOS 11 or later.
+
+Each release includes `SHA256SUMS`, the exact published crate, and a manifest
+recording the source commit, toolchain, and asset hashes. See the
+[release guide](https://github.com/mevanlc/tuisv/blob/main/RELEASING.md) for verification,
+release operations, and adapting this workflow to another project.
+
+To build a checkout locally, run `cargo install --path . --locked`. Checkout
+builds report `0.0.0`; release builds get their version from the Git tag.
+
+## Usage
+
 ```text
 tuisv [OPTIONS] <FILE>
 
@@ -119,3 +143,7 @@ cargo run -- samples/people.tsv
 cargo run -- --tsv samples/text.tsv
 cargo run -- --no-header samples/headerless.csv
 ```
+
+## License
+
+[MIT](LICENSE).
