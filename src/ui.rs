@@ -106,7 +106,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.data.header.is_none() && app.data.rows.is_empty() {
         if screen_row < usize::from(area.height) {
-            Paragraph::new("Empty CSV").render(row_area(area, screen_row), frame.buffer_mut());
+            Paragraph::new("Empty table").render(row_area(area, screen_row), frame.buffer_mut());
         }
         if app.help_visible() {
             render_help(frame, app);
@@ -476,7 +476,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 
     use super::*;
-    use crate::data::CsvData;
+    use crate::data::TableData;
 
     fn control_key(character: char) -> Event {
         Event::Key(KeyEvent::new(
@@ -490,7 +490,7 @@ mod tests {
     }
 
     fn render(csv: &str, has_header: bool, sticky_header: bool, width: u16, height: u16) -> App {
-        let data = CsvData::from_reader(csv.as_bytes(), has_header).unwrap();
+        let data = TableData::from_reader(csv.as_bytes(), has_header).unwrap();
         let mut app = App::new(data, sticky_header);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn renders_aligned_colored_columns_and_selected_cell() {
         let data =
-            CsvData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
+            TableData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         let backend = TestBackend::new(20, 4);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn transposed_tables_render_and_navigate_with_each_header_mode() {
         for (has_header, sticky_header) in [(true, true), (true, false), (false, false)] {
-            let data = CsvData::from_reader(
+            let data = TableData::from_reader(
                 "name,age,city\nAda,37,London\nBob,42,Rome\n".as_bytes(),
                 has_header,
             )
@@ -580,8 +580,9 @@ mod tests {
 
     #[test]
     fn narrow_columns_end_truncated_values_with_a_gray_ellipsis() {
-        let data = CsvData::from_reader("header,other\nabcdefgh,z\nijklmnop,y\n".as_bytes(), true)
-            .unwrap();
+        let data =
+            TableData::from_reader("header,other\nabcdefgh,z\nijklmnop,y\n".as_bytes(), true)
+                .unwrap();
         let mut app = App::new(data, true);
         app.data.set_column_width(0, 4);
         let backend = TestBackend::new(20, 4);
@@ -607,7 +608,7 @@ mod tests {
 
     #[test]
     fn truncation_does_not_split_a_wide_character() {
-        let data = CsvData::from_reader("header\n界x\n".as_bytes(), true).unwrap();
+        let data = TableData::from_reader("header\n界x\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         app.data.set_column_width(0, 2);
         let backend = TestBackend::new(6, 2);
@@ -624,7 +625,7 @@ mod tests {
 
     #[test]
     fn headers_render_primary_and_secondary_sort_directions() {
-        let data = CsvData::from_reader("first,second\nb,2\na,1\n".as_bytes(), true).unwrap();
+        let data = TableData::from_reader("first,second\nb,2\na,1\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         app.handle_event(control_key('s'));
         app.handle_event(key(KeyCode::Right));
@@ -656,7 +657,7 @@ mod tests {
     #[test]
     fn filter_bar_renders_textareas_above_the_shifted_header() {
         let data =
-            CsvData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
+            TableData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         app.handle_event(control_key('f'));
         app.handle_event(key(KeyCode::Char('^')));
@@ -680,7 +681,7 @@ mod tests {
 
     #[test]
     fn help_dialog_is_centered_column_aligned_and_color_accented() {
-        let data = CsvData::from_reader("value\na\n".as_bytes(), true).unwrap();
+        let data = TableData::from_reader("value\na\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         app.handle_event(key(KeyCode::Char('?')));
         let backend = TestBackend::new(80, 24);
@@ -723,7 +724,7 @@ mod tests {
 
     #[test]
     fn short_help_dialog_scrolls_its_contents() {
-        let data = CsvData::from_reader("value\na\n".as_bytes(), true).unwrap();
+        let data = TableData::from_reader("value\na\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         app.set_viewport(42, 8);
         app.handle_event(key(KeyCode::Char('?')));
@@ -762,7 +763,7 @@ mod tests {
 
     #[test]
     fn horizontal_offset_clips_inside_a_column() {
-        let data = CsvData::from_reader("header\nabcdefghij\n".as_bytes(), true).unwrap();
+        let data = TableData::from_reader("header\nabcdefghij\n".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         app.column_offset = 4;
         let backend = TestBackend::new(5, 2);
@@ -790,7 +791,7 @@ mod tests {
 
     #[test]
     fn empty_file_renders_message_without_selection() {
-        let data = CsvData::from_reader("".as_bytes(), true).unwrap();
+        let data = TableData::from_reader("".as_bytes(), true).unwrap();
         let mut app = App::new(data, true);
         let backend = TestBackend::new(12, 2);
         let mut terminal = Terminal::new(backend).unwrap();

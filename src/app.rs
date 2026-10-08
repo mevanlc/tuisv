@@ -16,7 +16,7 @@ use crossterm::{
 use ratatui::DefaultTerminal;
 
 use crate::{
-    data::CsvData,
+    data::TableData,
     filter::{FilterState, FilterUpdate},
     sort::SortState,
     ui,
@@ -41,8 +41,8 @@ struct ColumnResizeDrag {
 
 #[derive(Debug)]
 pub struct App {
-    pub data: CsvData,
-    alternate_data: Option<CsvData>,
+    pub data: TableData,
+    alternate_data: Option<TableData>,
     pub sticky_header: bool,
     pub selected: Option<CellPosition>,
     pub row_offset: usize,
@@ -58,7 +58,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(data: CsvData, sticky_header: bool) -> Self {
+    pub fn new(data: TableData, sticky_header: bool) -> Self {
         let selected = (!data.rows.is_empty() && data.column_count() > 0)
             .then_some(CellPosition { row: 0, column: 0 });
         let sort = SortState::new(data.rows.len());
@@ -611,7 +611,7 @@ mod tests {
 
     fn app(csv: &str, has_header: bool, sticky_header: bool) -> App {
         App::new(
-            CsvData::from_reader(csv.as_bytes(), has_header).unwrap(),
+            TableData::from_reader(csv.as_bytes(), has_header).unwrap(),
             sticky_header,
         )
     }

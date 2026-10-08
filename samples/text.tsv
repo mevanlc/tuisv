@@ -1,0 +1,7 @@
+kind	value, text	note
+unicode	界	Wide CJK character
+comma	red, green, blue	Literal commas
+quotes	"She said ""hello""."	Doubled quotes
+multiline	"first line
+second line"	Embedded newline
+tab	"left	right"	Quoted tab

@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::data::CsvData;
+use crate::data::TableData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -69,7 +69,7 @@ impl SortState {
         self.columns.iter().map(|column| column.column).collect()
     }
 
-    pub(crate) fn sort_by_column(&mut self, data: &CsvData, column: usize) {
+    pub(crate) fn sort_by_column(&mut self, data: &TableData, column: usize) {
         if column >= data.column_count() {
             return;
         }
@@ -106,12 +106,12 @@ impl SortState {
         self.row_order.sort_unstable();
     }
 
-    pub(crate) fn replace_rows(&mut self, row_indices: Vec<usize>, data: &CsvData) {
+    pub(crate) fn replace_rows(&mut self, row_indices: Vec<usize>, data: &TableData) {
         self.row_order = row_indices;
         self.apply(data);
     }
 
-    fn apply(&mut self, data: &CsvData) {
+    fn apply(&mut self, data: &TableData) {
         let columns = &self.columns;
         self.row_order.sort_by(|left_row, right_row| {
             for sorted_column in columns {
@@ -140,7 +140,7 @@ impl SortState {
     }
 }
 
-fn is_numeric_column(data: &CsvData, column: usize) -> bool {
+fn is_numeric_column(data: &TableData, column: usize) -> bool {
     !data.rows.is_empty()
         && data.rows.iter().all(|row| {
             row.get(column)
@@ -221,11 +221,11 @@ fn compare_fraction(left: &str, right: &str) -> Ordering {
 mod tests {
     use super::*;
 
-    fn data(csv: &str) -> CsvData {
-        CsvData::from_reader(csv.as_bytes(), true).unwrap()
+    fn data(csv: &str) -> TableData {
+        TableData::from_reader(csv.as_bytes(), true).unwrap()
     }
 
-    fn displayed_column(data: &CsvData, sort: &SortState, column: usize) -> Vec<String> {
+    fn displayed_column(data: &TableData, sort: &SortState, column: usize) -> Vec<String> {
         (0..data.rows.len())
             .map(|displayed_row| {
                 data.rows[sort.displayed_row_index(displayed_row).unwrap()][column].clone()
