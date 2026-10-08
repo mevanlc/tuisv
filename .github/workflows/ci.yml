@@ -122,8 +122,11 @@ jobs:
         if: matrix.kind == 'android'
         run: |
           NDK_VERSION=27.3.13750724
-          sdkmanager "ndk;$NDK_VERSION"
           NDK_BIN="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -x "$NDK_BIN/aarch64-linux-android24-clang" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+          fi
+          test -x "$NDK_BIN/aarch64-linux-android24-clang"
           {
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android24-clang"
             echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang"
@@ -217,7 +220,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          cargo publish --dry-run --locked --allow-dirty
+          cargo package --locked --allow-dirty
+          cargo publish --dry-run --locked --allow-dirty --no-verify
           cargo install --locked --path "target/package/tuisv-$RELEASE_VERSION" --root "$RUNNER_TEMP/crate-install"
           "$RUNNER_TEMP/crate-install/bin/tuisv" --version
           test "$("$RUNNER_TEMP/crate-install/bin/tuisv" --version)" = "tuisv $RELEASE_VERSION"

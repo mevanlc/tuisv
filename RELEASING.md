@@ -129,7 +129,7 @@ normalized archive metadata do not make hosted runner images immutable.
 ## Adapting this example
 
 Copy the two workflows, the release helper and tests, the target matrix,
-`rust-toolchain.toml`, and the relevant packaging/license metadata. This is a
+`rust-toolchain.toml`, `.gitattributes`, and the relevant packaging/license metadata. This is a
 copyable example, not a centrally hosted workflow dependency.
 
 - Update the Cargo package/binary names, repository URL, description, license,
