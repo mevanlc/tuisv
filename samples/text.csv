@@ -1,0 +1,9 @@
+kind,value,note
+unicode,界,Wide CJK character
+accent,café,Accented text
+emoji,🚀,Emoji
+comma,"red, green, blue",Quoted comma
+quotes,"She said ""hello"".",Doubled quotes
+multiline,"first line
+second line",Embedded newline
+tab,"left	right",Embedded tab

@@ -42,6 +42,7 @@ struct ColumnResizeDrag {
 #[derive(Debug)]
 pub struct App {
     pub data: CsvData,
+    alternate_data: Option<CsvData>,
     pub sticky_header: bool,
     pub selected: Option<CellPosition>,
     pub row_offset: usize,
@@ -64,6 +65,7 @@ impl App {
         let filter = FilterState::new(data.column_count());
         Self {
             data,
+            alternate_data: None,
             sticky_header,
             selected,
             row_offset: 0,
@@ -187,6 +189,10 @@ impl App {
             }
             KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.reset_sort_and_filters();
+                return;
+            }
+            KeyCode::Char('t' | 'T') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_transpose();
                 return;
             }
             KeyCode::Left if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
@@ -420,6 +426,22 @@ impl App {
         self.sort.reset();
         let update = self.filter.reset(&self.data.rows);
         self.apply_filter_update(update);
+    }
+
+    fn toggle_transpose(&mut self) {
+        let alternate = self
+            .alternate_data
+            .get_or_insert_with(|| self.data.transpose());
+        std::mem::swap(&mut self.data, alternate);
+
+        self.sort = SortState::new(self.data.rows.len());
+        // Dropping the old state cancels its worker and discards its result channel.
+        self.filter = FilterState::new(self.data.column_count());
+        self.selected = (!self.data.rows.is_empty() && self.data.column_count() > 0)
+            .then_some(CellPosition { row: 0, column: 0 });
+        self.row_offset = 0;
+        self.column_offset = 0;
+        self.column_resize_drag = None;
     }
 
     fn go_back(&mut self) {
@@ -724,6 +746,154 @@ mod tests {
     }
 
     #[test]
+    fn control_t_restores_ragged_data_and_remembers_each_orientations_widths() {
+        let mut app = app(include_str!("../samples/ragged.csv"), true, true);
+        app.data.set_column_width(1, 1);
+        let original = app.data.clone();
+        app.set_viewport(3, 2);
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(key(KeyCode::Down));
+        assert!(app.row_offset > 0);
+        assert!(app.column_offset > 0);
+        let handle = app.data.widths[0] + 1 - app.column_offset;
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            u16::try_from(handle).unwrap(),
+            0,
+        ));
+        assert!(app.column_resize_drag.is_some());
+
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.selected, Some(CellPosition { row: 0, column: 0 }));
+        assert_eq!(app.row_offset, 0);
+        assert_eq!(app.column_offset, 0);
+        assert!(app.column_resize_drag.is_none());
+        app.data.set_column_width(0, 2);
+        let transposed = app.data.clone();
+
+        app.handle_event(modified_key(KeyCode::Char('T'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, original);
+        assert!(Arc::ptr_eq(&app.data.rows, &original.rows));
+
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, transposed);
+        assert!(Arc::ptr_eq(&app.data.rows, &transposed.rows));
+    }
+
+    #[test]
+    fn control_t_uses_full_file_order_and_discards_active_filter_work() {
+        let mut app = app(include_str!("../samples/people.csv"), true, true);
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["Bob", "Ada", "Grace"]);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "^37$");
+        wait_for_filtered_rows(&mut app, 1);
+        assert_eq!(displayed_column(&app, 0), ["Ada"]);
+
+        send_text(&mut app, "x");
+        let original_rows = Arc::clone(&app.data.rows);
+        app.handle_event(key(KeyCode::Enter));
+        assert!(app.filter.is_processing());
+        app.handle_event(key(KeyCode::Tab));
+        assert!(app.filter.is_editing());
+
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            app.data.header.as_deref(),
+            Some(&["name".into(), "Ada".into(), "Bob".into(), "Grace".into()][..])
+        );
+        assert_eq!(displayed_column(&app, 0), ["age", "city"]);
+        assert!(app.sort.sorted_columns().is_empty());
+        assert!(!app.filter.is_visible());
+        assert!(!app.filter.is_editing());
+        assert!(!app.filter.is_processing());
+        assert_eq!(app.filter.pattern(3), Some(""));
+        assert_eq!(app.filter.pattern(4), None);
+
+        // Wait for the old worker to release the source rows before ticking the new state.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Arc::strong_count(&original_rows) > 2 {
+            assert!(
+                Instant::now() < deadline,
+                "cancelled filter worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+        assert_eq!(displayed_column(&app, 0), ["age", "city"]);
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "^age$");
+        app.handle_event(key(KeyCode::Enter));
+        wait_for_filter_worker(&mut app, 1);
+        assert_eq!(displayed_column(&app, 0), ["age"]);
+
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["Ada", "Bob", "Grace"]);
+        assert!(!app.filter.is_visible());
+        assert_eq!(app.filter.pattern(0), Some(""));
+    }
+
+    #[test]
+    fn control_t_reconciles_selection_for_empty_and_header_only_orientations() {
+        let first_cell = Some(CellPosition { row: 0, column: 0 });
+        for (csv, has_header, transposed_rows, selected) in [
+            ("", true, 0, None),
+            ("", false, 0, None),
+            ("name,age\n", true, 1, first_cell),
+            ("name\nAda\nBob\n", true, 0, None),
+            ("Ada\nBob\n", false, 1, first_cell),
+        ] {
+            let mut app = app(csv, has_header, has_header);
+            let original = app.data.clone();
+            let original_selection = app.selected;
+
+            app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+            assert_eq!(app.sort.row_count(), transposed_rows, "{csv:?}");
+            assert_eq!(app.selected, selected, "{csv:?}");
+            app.handle_event(key(KeyCode::Down));
+            app.handle_event(key(KeyCode::Right));
+
+            app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+            assert_eq!(app.data, original, "{csv:?}");
+            assert_eq!(app.selected, original_selection, "{csv:?}");
+        }
+    }
+
+    #[test]
+    fn reset_and_escape_keep_the_transposed_orientation() {
+        let mut app = app("name,age,city\nAda,37,London\nBob,42,Rome\n", true, true);
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        let transposed = app.data.clone();
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "^age$");
+        wait_for_filtered_rows(&mut app, 1);
+
+        app.handle_event(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, transposed);
+        assert_eq!(displayed_column(&app, 0), ["age", "city"]);
+        assert!(!app.sort.is_active());
+        assert_eq!(app.filter.pattern(0), Some(""));
+
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Esc));
+        assert!(!app.filter.is_visible());
+        assert!(app.sort.is_active());
+        assert!(!app.should_quit());
+        app.handle_event(key(KeyCode::Esc));
+        assert!(!app.sort.is_active());
+        assert!(!app.should_quit());
+        assert_eq!(app.data, transposed);
+        app.handle_event(key(KeyCode::Esc));
+        assert!(app.should_quit());
+        assert_eq!(app.data, transposed);
+    }
+
+    #[test]
     fn control_f_filters_with_fancy_regexes_across_columns_and_remembers_values() {
         let mut app = app(
             "name,city\nAda,London\nGrace,Rome\nAlan,London\n",
@@ -834,6 +1004,10 @@ mod tests {
 
         app.handle_event(key(KeyCode::Char('?')));
         assert!(app.help_visible());
+        let data = app.data.clone();
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, data);
+        assert!(app.alternate_data.is_none());
         app.handle_event(key(KeyCode::Down));
         assert_eq!(app.help_scroll(), 1);
         assert_eq!(app.selected, selected);

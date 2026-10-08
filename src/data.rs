@@ -1,6 +1,6 @@
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 
-use unicode_width::UnicodeWidthStr;
+use ratatui::text::Span;
 
 pub const COLUMN_GAP: usize = 2;
 
@@ -36,6 +36,23 @@ impl CsvData {
             .map(|record| record.map(|record| record.iter().map(display_field).collect::<Vec<_>>()))
             .collect::<Result<Vec<_>, _>>()?;
 
+        Ok(Self::from_records(header, rows))
+    }
+
+    /// Transpose the complete table, including its header, padding missing cells with empty strings.
+    pub(crate) fn transpose(&self) -> Self {
+        let mut records = (0..self.column_count()).map(|column| {
+            self.header
+                .iter()
+                .chain(self.rows.iter())
+                .map(|record| record.get(column).cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
+        let header = self.header.as_ref().and_then(|_| records.next());
+        Self::from_records(header, records.collect())
+    }
+
+    fn from_records(header: Option<Vec<String>>, rows: Vec<Vec<String>>) -> Self {
         let column_count = header
             .iter()
             .map(Vec::len)
@@ -46,19 +63,19 @@ impl CsvData {
 
         for record in header.iter().chain(rows.iter()) {
             for (column, value) in record.iter().enumerate() {
-                widths[column] = widths[column].max(UnicodeWidthStr::width(value.as_str()));
+                widths[column] = widths[column].max(Span::raw(value.as_str()).width());
             }
         }
 
         let (column_starts, content_width) = column_geometry(&widths);
 
-        Ok(Self {
+        Self {
             header,
             rows: Arc::new(rows),
             widths,
             column_starts,
             content_width,
-        })
+        }
     }
 
     pub fn column_count(&self) -> usize {
@@ -153,16 +170,108 @@ mod tests {
     }
 
     #[test]
-    fn escapes_controls_and_measures_unicode_cells() {
+    fn transpose_uses_the_first_column_as_the_header_and_autofits() {
+        let data = CsvData::from_reader("name,age\nAda,37\nBob,42\n".as_bytes(), true).unwrap();
+
+        let transposed = data.transpose();
+
+        assert_eq!(
+            transposed.header.as_deref(),
+            Some(&["name".into(), "Ada".into(), "Bob".into()][..])
+        );
+        assert_eq!(transposed.rows.as_ref(), &vec![vec!["age", "37", "42"]]);
+        assert_eq!(transposed.widths, [4, 3, 3]);
+        assert_eq!(transposed.column_starts, [0, 6, 11]);
+        assert_eq!(transposed.content_width, 16);
+    }
+
+    #[test]
+    fn transpose_keeps_headerless_rectangles_headerless() {
         let data = CsvData::from_reader(
-            "label,value\nwide,界\ncontrol,\"a\tb\nc\"\n".as_bytes(),
-            true,
+            include_bytes!("../samples/headerless.csv").as_slice(),
+            false,
         )
         .unwrap();
 
-        assert_eq!(data.rows[1][1], "a\\tb\\nc");
-        assert_eq!(UnicodeWidthStr::width(data.rows[0][1].as_str()), 2);
-        assert_eq!(data.widths[1], 7);
+        let transposed = data.transpose();
+
+        assert_eq!(transposed.header, None);
+        assert_eq!(
+            transposed.rows.as_ref(),
+            &vec![vec!["Ada", "Bob"], vec!["37", "42"], vec!["London", "Rome"]]
+        );
+        assert_eq!(transposed.column_count(), 2);
+    }
+
+    #[test]
+    fn transpose_pads_missing_header_and_row_cells() {
+        let data =
+            CsvData::from_reader(include_bytes!("../samples/ragged.csv").as_slice(), true).unwrap();
+
+        let transposed = data.transpose();
+
+        assert_eq!(
+            transposed.rows.as_ref(),
+            &vec![vec!["age", "37", ""], vec!["", "extra", ""]]
+        );
+        assert_eq!(data.header.as_ref().unwrap().len(), 2);
+        assert_eq!(data.rows[1], ["Bob"]);
+    }
+
+    #[test]
+    fn transpose_handles_empty_header_only_and_single_column_tables() {
+        for has_header in [false, true] {
+            let empty = CsvData::from_reader("".as_bytes(), has_header).unwrap();
+            assert_eq!(empty.transpose(), empty);
+        }
+
+        let header_only = CsvData::from_reader("name,age\n".as_bytes(), true)
+            .unwrap()
+            .transpose();
+        assert_eq!(header_only.header.as_deref(), Some(&["name".into()][..]));
+        assert_eq!(header_only.rows.as_ref(), &vec![vec!["age"]]);
+
+        let single_column = CsvData::from_reader("name\nAda\nBob\n".as_bytes(), true)
+            .unwrap()
+            .transpose();
+        assert_eq!(
+            single_column.header.as_deref(),
+            Some(&["name".into(), "Ada".into(), "Bob".into()][..])
+        );
+        assert!(single_column.rows.is_empty());
+
+        let headerless_column = CsvData::from_reader("Ada\nBob\n".as_bytes(), false)
+            .unwrap()
+            .transpose();
+        assert_eq!(headerless_column.header, None);
+        assert_eq!(headerless_column.rows.as_ref(), &vec![vec!["Ada", "Bob"]]);
+    }
+
+    #[test]
+    fn transpose_preserves_escaped_fields_and_measures_unicode() {
+        let data = CsvData::from_reader("label,value\n界,\"a\tb\nc\"\n".as_bytes(), true).unwrap();
+
+        let transposed = data.transpose();
+
+        assert_eq!(
+            transposed.header.as_deref(),
+            Some(&["label".into(), "界".into()][..])
+        );
+        assert_eq!(transposed.rows.as_ref(), &vec![vec!["value", "a\\tb\\nc"]]);
+        assert_eq!(transposed.widths, [5, 7]);
+    }
+
+    #[test]
+    fn escapes_controls_and_measures_unicode_cells() {
+        let data =
+            CsvData::from_reader(include_bytes!("../samples/text.csv").as_slice(), true).unwrap();
+
+        assert_eq!(data.rows[3][1], "red, green, blue");
+        assert_eq!(data.rows[4][1], "She said \"hello\".");
+        assert_eq!(data.rows[5][1], "first line\\nsecond line");
+        assert_eq!(data.rows[6][1], "left\\tright");
+        assert_eq!(Span::raw(data.rows[0][1].as_str()).width(), 2);
+        assert_eq!(data.widths[1], 23);
     }
 
     #[test]

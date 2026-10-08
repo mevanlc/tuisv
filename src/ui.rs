@@ -36,6 +36,10 @@ const HELP_ENTRIES: &[HelpEntry] = &[
     HelpEntry::Binding("Esc", "Close help/filter, reset sorting, then exit"),
     HelpEntry::Binding("q / Q", "Exit outside the help dialog and filter editing"),
     HelpEntry::Binding("Ctrl-C", "Exit immediately"),
+    HelpEntry::Binding(
+        "Ctrl-T",
+        "Transpose the full file; clear sorting and filters",
+    ),
     HelpEntry::Section("Navigation"),
     HelpEntry::Binding("Arrow keys", "Move the selected cell"),
     HelpEntry::Binding("Mouse wheel", "Pan without moving the selection"),
@@ -520,6 +524,61 @@ mod tests {
     }
 
     #[test]
+    fn transposed_tables_render_and_navigate_with_each_header_mode() {
+        for (has_header, sticky_header) in [(true, true), (true, false), (false, false)] {
+            let data = CsvData::from_reader(
+                "name,age,city\nAda,37,London\nBob,42,Rome\n".as_bytes(),
+                has_header,
+            )
+            .unwrap();
+            let mut app = App::new(data, sticky_header);
+            app.handle_event(control_key('t'));
+            let backend = TestBackend::new(24, 2);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].symbol(), "n");
+            assert_eq!(buffer[(6, 0)].symbol(), "A");
+            assert_eq!(buffer[(14, 0)].symbol(), "B");
+            assert_eq!(buffer[(0, 0)].bg == Color::DarkGray, has_header);
+            let selected_row = u16::from(has_header);
+            assert!(
+                buffer[(0, selected_row)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+            assert_eq!(buffer[(6, 1)].symbol(), "3");
+
+            app.handle_event(key(KeyCode::Down));
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(
+                buffer[(0, 0)].symbol(),
+                if has_header && !sticky_header {
+                    "a"
+                } else {
+                    "n"
+                }
+            );
+            assert_eq!(buffer[(0, 1)].symbol(), if has_header { "c" } else { "a" });
+            assert!(buffer[(0, 1)].modifier.contains(Modifier::REVERSED));
+
+            app.handle_event(control_key('t'));
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].symbol(), "n");
+            assert_eq!(buffer[(0, 1)].symbol(), "A");
+        }
+    }
+
+    #[test]
     fn narrow_columns_end_truncated_values_with_a_gray_ellipsis() {
         let data = CsvData::from_reader("header,other\nabcdefgh,z\nijklmnop,y\n".as_bytes(), true)
             .unwrap();
@@ -643,6 +702,10 @@ mod tests {
         assert_eq!(buffer[(popup.x, popup.y)].fg, Color::LightMagenta);
         assert!(screen.contains("Keymap"));
         assert!(screen.contains("General"));
+        assert!(
+            screen
+                .contains("Ctrl-T             Transpose the full file; clear sorting and filters")
+        );
         assert!(screen.contains("Ctrl-F             Show or hide the filter row"));
         assert!(
             buffer

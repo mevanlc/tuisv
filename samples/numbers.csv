@@ -1,0 +1,8 @@
+label,integer,decimal
+ten,10,10.0
+two,2,2.5
+minus-ten,-10,-10.25
+minus-two,-2,-2.5
+zero,0,0.0
+fraction,1,0.125
+large,999999999999999999999999999999,12345678901234567890.125
