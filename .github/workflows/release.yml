@@ -110,7 +110,8 @@ jobs:
     timeout-minutes: 20
     environment: crates-io
     permissions:
-      contents: read
+      # GitHub only exposes draft releases to identities with push access.
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
