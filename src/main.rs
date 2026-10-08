@@ -28,7 +28,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         io::Error::other(format!("failed to read {}: {error}", cli.file.display()))
     })?;
     let sticky_header = !cli.no_header && !cli.no_sticky_header;
-    let mut app = App::new(data, sticky_header);
+    let mut app = App::new(data, sticky_header, cli.sticky_leader);
     let mut terminal = app::TerminalSession::start()?;
 
     terminal.run(&mut app)?;

@@ -1,6 +1,7 @@
 use std::{
     io,
     io::stdout,
+    ops::Range,
     panic,
     sync::Arc,
     time::{Duration, Instant},
@@ -16,7 +17,7 @@ use crossterm::{
 use ratatui::DefaultTerminal;
 
 use crate::{
-    data::TableData,
+    data::{COLUMN_GAP, TableData},
     filter::{FilterState, FilterUpdate},
     sort::SortState,
     ui,
@@ -39,11 +40,19 @@ struct ColumnResizeDrag {
     initial_width: usize,
 }
 
+pub(crate) struct ColumnViewport {
+    pub columns: Range<usize>,
+    pub screen_start: usize,
+    pub content_start: usize,
+    pub width: usize,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub data: TableData,
     alternate_data: Option<TableData>,
     pub sticky_header: bool,
+    pub sticky_leader: bool,
     pub selected: Option<CellPosition>,
     pub row_offset: usize,
     pub column_offset: usize,
@@ -58,7 +67,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(data: TableData, sticky_header: bool) -> Self {
+    pub fn new(data: TableData, sticky_header: bool, sticky_leader: bool) -> Self {
         let selected = (!data.rows.is_empty() && data.column_count() > 0)
             .then_some(CellPosition { row: 0, column: 0 });
         let sort = SortState::new(data.rows.len());
@@ -67,6 +76,7 @@ impl App {
             data,
             alternate_data: None,
             sticky_header,
+            sticky_leader,
             selected,
             row_offset: 0,
             column_offset: 0,
@@ -126,6 +136,53 @@ impl App {
 
     pub fn visual_row_for_data(&self, data_row: usize) -> usize {
         data_row + usize::from(!self.sticky_header && self.data.header.is_some())
+    }
+
+    /// The fixed leader and scrolling columns share this geometry for rendering and input.
+    pub(crate) fn column_viewports(&self) -> [ColumnViewport; 2] {
+        let column_count = self.data.column_count();
+        let leader_width = if self.sticky_leader && column_count > 0 {
+            // Leave a cell for the other columns even when the leader is wider than the screen.
+            self.data.widths[0].saturating_add(COLUMN_GAP).min(
+                self.viewport_width
+                    .saturating_sub(usize::from(column_count > 1)),
+            )
+        } else {
+            0
+        };
+        let first_scrolling_column = usize::from(leader_width > 0);
+        let scrolling_start = self
+            .data
+            .column_starts
+            .get(first_scrolling_column)
+            .copied()
+            .unwrap_or(self.data.content_width);
+        [
+            ColumnViewport {
+                columns: 0..first_scrolling_column,
+                screen_start: 0,
+                content_start: 0,
+                width: leader_width,
+            },
+            ColumnViewport {
+                columns: first_scrolling_column..column_count,
+                screen_start: leader_width,
+                content_start: scrolling_start.saturating_add(self.column_offset),
+                width: self.viewport_width.saturating_sub(leader_width),
+            },
+        ]
+    }
+
+    fn content_column_at(&self, screen_column: u16) -> usize {
+        let [leader, scrolling] = self.column_viewports();
+        let screen_column = usize::from(screen_column);
+        if screen_column < leader.width {
+            screen_column
+        } else {
+            scrolling
+                .content_start
+                .saturating_add(screen_column.saturating_sub(scrolling.screen_start))
+        }
     }
 
     pub(crate) fn displayed_row(&self, displayed_row: usize) -> Option<&[String]> {
@@ -336,19 +393,14 @@ impl App {
         (self.data.header.is_some()
             && (self.sticky_header || self.row_offset == 0)
             && screen_row == header_screen_row)
-            .then(|| {
-                self.column_offset
-                    .saturating_add(usize::from(screen_column))
-            })
+            .then(|| self.content_column_at(screen_column))
     }
 
     fn activate_filter_at(&mut self, screen_column: u16, screen_row: u16) -> bool {
         if !self.filter.is_visible() || screen_row != 0 {
             return false;
         }
-        let content_column = self
-            .column_offset
-            .saturating_add(usize::from(screen_column));
+        let content_column = self.content_column_at(screen_column);
         let Some(column) = self
             .data
             .column_starts
@@ -515,11 +567,18 @@ impl App {
         else {
             return;
         };
+        let [leader, scrolling] = self.column_viewports();
+        if leader.columns.contains(&column) {
+            self.clamp_offsets();
+            return;
+        }
+        let scrolling_start = self.data.column_starts[scrolling.columns.start];
+        let column_start = column_start.saturating_sub(scrolling_start);
         let column_end = column_start.saturating_add(column_width);
-        if column_start < self.column_offset || column_width > self.viewport_width {
+        if column_start < self.column_offset || column_width > scrolling.width {
             self.column_offset = column_start;
-        } else if self.viewport_width > 0 && column_end > self.column_offset + self.viewport_width {
-            self.column_offset = column_end - self.viewport_width;
+        } else if scrolling.width > 0 && column_end > self.column_offset + scrolling.width {
+            self.column_offset = column_end - scrolling.width;
         }
         self.clamp_offsets();
     }
@@ -542,16 +601,7 @@ impl App {
             self.row_offset = visual_row + 1 - visible_height;
         }
 
-        let column_start = self.data.column_starts[selected.column];
-        let column_width = self.data.widths[selected.column];
-        let column_end = column_start.saturating_add(column_width);
-        if column_start < self.column_offset || column_width > self.viewport_width {
-            self.column_offset = column_start;
-        } else if self.viewport_width > 0 && column_end > self.column_offset + self.viewport_width {
-            self.column_offset = column_end - self.viewport_width;
-        }
-
-        self.clamp_offsets();
+        self.ensure_column_visible(selected.column);
     }
 
     fn clamp_offsets(&mut self) {
@@ -560,7 +610,18 @@ impl App {
             .saturating_sub(self.scrollable_height());
         self.row_offset = self.row_offset.min(maximum_row_offset);
 
-        let maximum_column_offset = self.data.content_width.saturating_sub(self.viewport_width);
+        let [_, scrolling] = self.column_viewports();
+        let scrolling_start = self
+            .data
+            .column_starts
+            .get(scrolling.columns.start)
+            .copied()
+            .unwrap_or(self.data.content_width);
+        let maximum_column_offset = self
+            .data
+            .content_width
+            .saturating_sub(scrolling_start)
+            .saturating_sub(scrolling.width);
         self.column_offset = self.column_offset.min(maximum_column_offset);
     }
 }
@@ -613,6 +674,7 @@ mod tests {
         App::new(
             TableData::from_reader(csv.as_bytes(), has_header).unwrap(),
             sticky_header,
+            false,
         )
     }
 
@@ -1156,6 +1218,93 @@ mod tests {
         app.handle_event(click(0, 0));
 
         assert!(app.sort.sorted_columns().is_empty());
+    }
+
+    #[test]
+    fn sticky_leader_navigation_and_panning_scroll_only_the_other_columns() {
+        let data = TableData::from_reader(
+            "lead,second,third\nAda,123456,abcdef\nBob,654321,fedcba\n".as_bytes(),
+            true,
+        )
+        .unwrap();
+        let mut app = App::new(data, true, true);
+        app.set_viewport(12, 3);
+
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.column_offset, 0);
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.column_offset, 8);
+        assert_eq!(app.selected.unwrap().column, 2);
+        app.handle_event(key(KeyCode::Left));
+        assert_eq!(app.column_offset, 0);
+
+        app.handle_event(wheel(MouseEventKind::ScrollRight, KeyModifiers::NONE));
+        app.handle_event(wheel(MouseEventKind::ScrollRight, KeyModifiers::NONE));
+        app.handle_event(key(KeyCode::Left));
+        app.handle_event(key(KeyCode::Down));
+        assert_eq!(app.selected, Some(CellPosition { row: 1, column: 0 }));
+        assert_eq!(app.column_offset, 8);
+        for _ in 0..10 {
+            app.handle_event(wheel(MouseEventKind::ScrollRight, KeyModifiers::NONE));
+        }
+        assert_eq!(app.column_offset, 10);
+
+        app.set_viewport(40, 3);
+        assert_eq!(app.column_offset, 0);
+    }
+
+    #[test]
+    fn sticky_leader_mouse_controls_follow_fixed_and_scrolled_columns() {
+        let data = TableData::from_reader("lead,second,third\nAda,1,a\nBob,2,b\n".as_bytes(), true)
+            .unwrap();
+        let mut app = App::new(data, true, true);
+        app.set_viewport(14, 4);
+        app.column_offset = 4;
+
+        app.handle_event(click(0, 0));
+        assert_eq!(app.sort.sorted_columns(), [0]);
+        app.handle_event(click(10, 0));
+        assert_eq!(app.sort.sorted_columns(), [2, 0]);
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.column_offset, 4);
+        app.handle_event(click(10, 0));
+        assert_eq!(app.filter.active_column(), 2);
+        assert_eq!(app.column_offset, 5);
+        app.handle_event(click(0, 0));
+        assert_eq!(app.filter.active_column(), 0);
+        assert_eq!(app.column_offset, 5);
+
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 5, 1));
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 3, 1));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 3, 1));
+        assert_eq!(app.data.widths[0], 2);
+
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 13, 1));
+        assert_eq!(app.column_resize_drag.unwrap().column, 2);
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 12, 1));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 12, 1));
+        assert_eq!(app.data.widths[2], 4);
+    }
+
+    #[test]
+    fn sticky_leader_leaves_scrolling_space_in_a_narrow_viewport() {
+        let data = TableData::from_reader("long_leader,x,y\nAda,a,b\n".as_bytes(), true).unwrap();
+        let mut app = App::new(data, true, true);
+        app.set_viewport(4, 2);
+        let [leader, scrolling] = app.column_viewports();
+        assert_eq!(leader.width, 3);
+        assert_eq!(scrolling.width, 1);
+
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.column_offset, 3);
+        app.set_viewport(1, 2);
+        app.handle_event(key(KeyCode::Left));
+        app.handle_event(key(KeyCode::Left));
+        assert_eq!(app.column_offset, 0);
+        app.set_viewport(0, 0);
+        app.handle_event(key(KeyCode::Right));
     }
 
     #[test]

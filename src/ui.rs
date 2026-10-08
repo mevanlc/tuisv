@@ -124,7 +124,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             app,
             header,
             None,
-            app.column_offset,
             header_style(),
         );
         screen_row += 1;
@@ -142,7 +141,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 app,
                 app.data.header.as_deref().unwrap_or_default(),
                 None,
-                app.column_offset,
                 header_style(),
             );
             continue;
@@ -159,7 +157,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             app,
             record,
             app.selected.filter(|selected| selected.row == data_row),
-            app.column_offset,
             Style::default(),
         );
     }
@@ -179,11 +176,15 @@ fn render_filter_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let active_column = app.filter.active_column();
     let editing = app.filter.is_editing();
     let processing = app.filter.is_processing();
-    let horizontal_offset = app.column_offset;
-    let viewport_start = horizontal_offset;
-    let viewport_end = viewport_start.saturating_add(usize::from(area.width));
+    let viewports = app.column_viewports();
 
     for column in 0..app.data.column_count() {
+        let viewport = viewports
+            .iter()
+            .find(|viewport| viewport.columns.contains(&column))
+            .expect("each column belongs to a viewport");
+        let viewport_start = viewport.content_start;
+        let viewport_end = viewport_start.saturating_add(viewport.width);
         let column_start = app.data.column_starts[column];
         let column_width = app.data.widths[column];
         let column_end = column_start.saturating_add(column_width);
@@ -210,7 +211,8 @@ fn render_filter_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             for content_column in visible_start..visible_end {
                 let source_x = u16::try_from(content_column - column_start).unwrap_or(u16::MAX);
                 let target_x = area.x.saturating_add(
-                    u16::try_from(content_column - viewport_start).unwrap_or(u16::MAX),
+                    u16::try_from(viewport.screen_start + content_column - viewport_start)
+                        .unwrap_or(u16::MAX),
                 );
                 frame.buffer_mut()[(target_x, area.y)] = local[(source_x, 0)].clone();
             }
@@ -219,7 +221,8 @@ fn render_filter_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let separator_column = column_end.saturating_add(1);
         if (viewport_start..viewport_end).contains(&separator_column) {
             let target_x = area.x.saturating_add(
-                u16::try_from(separator_column - viewport_start).unwrap_or(u16::MAX),
+                u16::try_from(viewport.screen_start + separator_column - viewport_start)
+                    .unwrap_or(u16::MAX),
             );
             frame.buffer_mut()[(target_x, area.y)]
                 .set_symbol("│")
@@ -394,27 +397,40 @@ fn render_record(
     app: &App,
     record: &[String],
     selected: Option<CellPosition>,
-    horizontal_offset: usize,
     base_style: Style,
 ) {
-    let line = record_line(app, record, selected, base_style);
-    Paragraph::new(line)
-        .style(base_style)
-        .scroll((0, u16::try_from(horizontal_offset).unwrap_or(u16::MAX)))
-        .render(area, frame.buffer_mut());
+    for viewport in app.column_viewports() {
+        if viewport.width == 0 || viewport.columns.is_empty() {
+            continue;
+        }
+        let horizontal_offset =
+            viewport.content_start - app.data.column_starts[viewport.columns.start];
+        let part = Rect::new(
+            area.x + u16::try_from(viewport.screen_start).unwrap_or(u16::MAX),
+            area.y,
+            u16::try_from(viewport.width).unwrap_or(u16::MAX),
+            area.height,
+        );
+        let line = record_line(app, record, selected, viewport.columns, base_style);
+        Paragraph::new(line)
+            .style(base_style)
+            .scroll((0, u16::try_from(horizontal_offset).unwrap_or(u16::MAX)))
+            .render(part, frame.buffer_mut());
+    }
 }
 
 fn record_line(
     app: &App,
     record: &[String],
     selected: Option<CellPosition>,
+    columns: std::ops::Range<usize>,
     base_style: Style,
 ) -> Line<'static> {
     let data = &app.data;
-    let mut spans = Vec::with_capacity(data.column_count().saturating_mul(3));
+    let mut spans = Vec::with_capacity(columns.len().saturating_mul(3));
     let is_header = base_style.bg == Some(Color::DarkGray);
 
-    for column in 0..data.column_count() {
+    for column in columns {
         let value = record.get(column).map_or("", String::as_str);
         let style = if is_header {
             base_style
@@ -491,7 +507,7 @@ mod tests {
 
     fn render(csv: &str, has_header: bool, sticky_header: bool, width: u16, height: u16) -> App {
         let data = TableData::from_reader(csv.as_bytes(), has_header).unwrap();
-        let mut app = App::new(data, sticky_header);
+        let mut app = App::new(data, sticky_header, false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -504,7 +520,7 @@ mod tests {
     fn renders_aligned_colored_columns_and_selected_cell() {
         let data =
             TableData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         let backend = TestBackend::new(20, 4);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -531,7 +547,7 @@ mod tests {
                 has_header,
             )
             .unwrap();
-            let mut app = App::new(data, sticky_header);
+            let mut app = App::new(data, sticky_header, false);
             app.handle_event(control_key('t'));
             let backend = TestBackend::new(24, 2);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -583,7 +599,7 @@ mod tests {
         let data =
             TableData::from_reader("header,other\nabcdefgh,z\nijklmnop,y\n".as_bytes(), true)
                 .unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.data.set_column_width(0, 4);
         let backend = TestBackend::new(20, 4);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -609,7 +625,7 @@ mod tests {
     #[test]
     fn truncation_does_not_split_a_wide_character() {
         let data = TableData::from_reader("header\n界x\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.data.set_column_width(0, 2);
         let backend = TestBackend::new(6, 2);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -626,7 +642,7 @@ mod tests {
     #[test]
     fn headers_render_primary_and_secondary_sort_directions() {
         let data = TableData::from_reader("first,second\nb,2\na,1\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.handle_event(control_key('s'));
         app.handle_event(key(KeyCode::Right));
         app.handle_event(control_key('s'));
@@ -658,7 +674,7 @@ mod tests {
     fn filter_bar_renders_textareas_above_the_shifted_header() {
         let data =
             TableData::from_reader("name,city\nAda,London\nGrace,Rome\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.handle_event(control_key('f'));
         app.handle_event(key(KeyCode::Char('^')));
         app.handle_event(key(KeyCode::Char('A')));
@@ -682,7 +698,7 @@ mod tests {
     #[test]
     fn help_dialog_is_centered_column_aligned_and_color_accented() {
         let data = TableData::from_reader("value\na\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.handle_event(key(KeyCode::Char('?')));
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -725,7 +741,7 @@ mod tests {
     #[test]
     fn short_help_dialog_scrolls_its_contents() {
         let data = TableData::from_reader("value\na\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.set_viewport(42, 8);
         app.handle_event(key(KeyCode::Char('?')));
         let backend = TestBackend::new(42, 8);
@@ -764,7 +780,7 @@ mod tests {
     #[test]
     fn horizontal_offset_clips_inside_a_column() {
         let data = TableData::from_reader("header\nabcdefghij\n".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         app.column_offset = 4;
         let backend = TestBackend::new(5, 2);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -790,9 +806,106 @@ mod tests {
     }
 
     #[test]
+    fn sticky_leader_keeps_headers_body_and_selection_aligned_after_panning() {
+        for (has_header, sticky_header) in [(true, true), (true, false), (false, false)] {
+            let input = if has_header {
+                "lead,second,third\nAda,123456,abcdef\nBob,654321,fedcba\n"
+            } else {
+                "Ada,123456,abcdef\nBob,654321,fedcba\n"
+            };
+            let mut data = TableData::from_reader(input.as_bytes(), has_header).unwrap();
+            data.set_column_width(0, 4);
+            let mut app = App::new(data, sticky_header, true);
+            let mut terminal = Terminal::new(TestBackend::new(14, 2)).unwrap();
+            app.set_viewport(14, 2);
+            app.column_offset = 8;
+            app.selected = Some(CellPosition { row: 0, column: 2 });
+
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].symbol(), if has_header { "l" } else { "A" });
+            assert_eq!(buffer[(6, 0)].symbol(), if has_header { "t" } else { "a" });
+            let body_row = u16::from(has_header);
+            assert_eq!(buffer[(0, body_row)].symbol(), "A");
+            assert_eq!(buffer[(6, body_row)].symbol(), "a");
+            assert!(buffer[(6, body_row)].modifier.contains(Modifier::REVERSED));
+            assert!(!buffer[(0, body_row)].modifier.contains(Modifier::REVERSED));
+
+            app.handle_event(key(KeyCode::Down));
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 1)].symbol(), "B");
+            assert_eq!(buffer[(6, 1)].symbol(), "f");
+            assert_eq!(
+                buffer[(0, 0)].symbol(),
+                if has_header && sticky_header {
+                    "l"
+                } else {
+                    "A"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn sticky_leader_filter_fields_stay_aligned_with_their_columns() {
+        let data = TableData::from_reader(
+            "lead,second,third\nAda,123456,abcdef\nBob,654321,fedcba\n".as_bytes(),
+            true,
+        )
+        .unwrap();
+        let mut app = App::new(data, true, true);
+        app.set_viewport(14, 4);
+        app.handle_event(control_key('f'));
+        app.handle_event(key(KeyCode::Char('A')));
+        app.handle_event(key(KeyCode::Tab));
+        app.handle_event(key(KeyCode::Tab));
+        app.handle_event(key(KeyCode::Char('a')));
+        app.column_offset = 8;
+        let mut terminal = Terminal::new(TestBackend::new(14, 4)).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "A");
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(28, 28, 28));
+        assert_eq!(buffer[(5, 0)].symbol(), "│");
+        assert_eq!(buffer[(6, 0)].symbol(), "a");
+        assert_eq!(buffer[(6, 0)].bg, Color::Rgb(55, 55, 55));
+        assert_eq!(buffer[(13, 0)].symbol(), "│");
+        assert_eq!(buffer[(0, 1)].symbol(), "l");
+        assert_eq!(buffer[(6, 1)].symbol(), "t");
+        assert_eq!(buffer[(0, 2)].symbol(), "A");
+        assert_eq!(buffer[(6, 2)].symbol(), "a");
+    }
+
+    #[test]
+    fn sticky_leader_handles_transpose_and_small_or_empty_tables() {
+        for input in ["", "name\n", "name\n界\n", "lead,value\n界,x\nAda,y\n"] {
+            let data = TableData::from_reader(input.as_bytes(), true).unwrap();
+            let mut app = App::new(data, true, true);
+            for width in [1, 2, 4, 20] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+                for _ in 0..2 {
+                    terminal
+                        .draw(|frame| super::render(frame, &mut app))
+                        .unwrap();
+                    app.handle_event(control_key('t'));
+                    assert!(app.sticky_leader);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn empty_file_renders_message_without_selection() {
         let data = TableData::from_reader("".as_bytes(), true).unwrap();
-        let mut app = App::new(data, true);
+        let mut app = App::new(data, true, false);
         let backend = TestBackend::new(12, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal

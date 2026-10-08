@@ -20,13 +20,29 @@ pub struct Cli {
     #[arg(long)]
     pub detect: bool,
 
+    /// Treat the first record as a header (the default).
+    #[arg(long, overrides_with_all = ["header", "no_header"])]
+    pub header: bool,
+
     /// Treat the first record as data instead of a header.
-    #[arg(long)]
+    #[arg(long, overrides_with_all = ["header", "no_header"])]
     pub no_header: bool,
 
+    /// Keep the header visible while scrolling (the default).
+    #[arg(long, overrides_with_all = ["sticky_header", "no_sticky_header"])]
+    pub sticky_header: bool,
+
     /// Scroll the header with the data instead of keeping it visible.
-    #[arg(long)]
+    #[arg(long, overrides_with_all = ["sticky_header", "no_sticky_header"])]
     pub no_sticky_header: bool,
+
+    /// Keep column 1 visible while scrolling horizontally.
+    #[arg(long, overrides_with_all = ["sticky_leader", "no_sticky_leader"])]
+    pub sticky_leader: bool,
+
+    /// Scroll column 1 with the other columns (the default).
+    #[arg(long, overrides_with_all = ["sticky_leader", "no_sticky_leader"])]
+    pub no_sticky_leader: bool,
 
     /// CSV or TSV file to view.
     #[arg(value_name = "FILE")]
@@ -64,6 +80,59 @@ mod tests {
     fn requires_exactly_one_file() {
         assert!(Cli::try_parse_from(["tuisv"]).is_err());
         assert!(Cli::try_parse_from(["tuisv", "one.csv", "two.csv"]).is_err());
+    }
+
+    #[test]
+    fn header_and_sticky_defaults_are_preserved() {
+        let cli = Cli::try_parse_from(["tuisv", "data.csv"]).unwrap();
+        assert!(!cli.no_header);
+        assert!(!cli.no_sticky_header);
+        assert!(!cli.sticky_leader);
+    }
+
+    #[test]
+    fn paired_flags_accept_repetition_and_the_last_one_wins() {
+        for (positive, negative) in [
+            ("--header", "--no-header"),
+            ("--sticky-header", "--no-sticky-header"),
+            ("--sticky-leader", "--no-sticky-leader"),
+        ] {
+            for first in [positive, negative] {
+                for second in [positive, negative] {
+                    for last in [positive, negative] {
+                        let cli = Cli::try_parse_from(["tuisv", first, "data.csv", second, last])
+                            .unwrap();
+                        let (enabled, disabled) = match positive {
+                            "--header" => (cli.header, cli.no_header),
+                            "--sticky-header" => (cli.sticky_header, cli.no_sticky_header),
+                            "--sticky-leader" => (cli.sticky_leader, cli.no_sticky_leader),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(enabled, last == positive);
+                        assert_eq!(disabled, last == negative);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paired_flags_override_independently() {
+        let cli = Cli::try_parse_from([
+            "tuisv",
+            "--no-header",
+            "--no-sticky-header",
+            "--sticky-leader",
+            "--header",
+            "--no-sticky-leader",
+            "--sticky-header",
+            "--sticky-leader",
+            "data.tsv",
+        ])
+        .unwrap();
+        assert!(!cli.no_header);
+        assert!(!cli.no_sticky_header);
+        assert!(cli.sticky_leader);
     }
 
     #[test]

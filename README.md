@@ -11,11 +11,24 @@ Options:
       --csv               Force comma-separated input
       --tsv               Force tab-separated input
       --detect            Auto-detect CSV or TSV (the default)
+      --header            Treat the first record as a header (the default)
       --no-header         Treat the first record as data
+      --sticky-header     Keep the header visible while scrolling (the default)
       --no-sticky-header  Scroll the header with the data
+      --sticky-leader     Keep column 1 visible while scrolling horizontally
+      --no-sticky-leader  Scroll column 1 with the other columns (the default)
   -h, --help              Print help
   -V, --version           Print version
 ```
+
+For each pair (`--header` / `--no-header`, `--sticky-header` /
+`--no-sticky-header`, and `--sticky-leader` / `--no-sticky-leader`), the last flag
+wins. Headers and sticky headers are enabled by default; the sticky leader is
+disabled by default. Without a header, the sticky-header setting has no effect.
+The sticky leader keeps the first column's cells, header, and filter field fixed
+while the remaining columns scroll horizontally. In a narrow terminal, the leader
+is clipped to leave at least one cell for the other columns. After transposing,
+the first column of the current orientation stays fixed.
 
 Format detection uses the file's contents, regardless of its extension. It parses
 logical records with quoting and embedded newlines, then applies these rules in
