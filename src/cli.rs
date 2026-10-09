@@ -8,6 +8,10 @@ use crate::data::InputFormat;
 #[derive(Debug, Parser)]
 #[command(version, about, group(ArgGroup::new("format").args(["csv", "tsv", "detect"])))]
 pub struct Cli {
+    /// Print the interactive keymap and exit.
+    #[arg(long)]
+    pub help_keymap: bool,
+
     /// Force comma-separated input.
     #[arg(long)]
     pub csv: bool,
@@ -45,8 +49,8 @@ pub struct Cli {
     pub no_sticky_leader: bool,
 
     /// CSV or TSV file to view.
-    #[arg(value_name = "FILE")]
-    pub file: PathBuf,
+    #[arg(value_name = "FILE", required_unless_present = "help_keymap")]
+    pub file: Option<PathBuf>,
 }
 
 impl Cli {
@@ -72,7 +76,7 @@ mod tests {
 
         assert!(cli.no_header);
         assert!(cli.no_sticky_header);
-        assert_eq!(cli.file, PathBuf::from("data.csv"));
+        assert_eq!(cli.file, Some(PathBuf::from("data.csv")));
         assert_eq!(cli.input_format(), InputFormat::Detect);
     }
 
@@ -80,6 +84,16 @@ mod tests {
     fn requires_exactly_one_file() {
         assert!(Cli::try_parse_from(["tuisv"]).is_err());
         assert!(Cli::try_parse_from(["tuisv", "one.csv", "two.csv"]).is_err());
+    }
+
+    #[test]
+    fn keymap_help_does_not_require_a_file() {
+        let cli = Cli::try_parse_from(["tuisv", "--help-keymap"]).unwrap();
+        assert!(cli.help_keymap);
+        assert!(cli.file.is_none());
+        let cli = Cli::try_parse_from(["tuisv", "--help-keymap", "data.csv"]).unwrap();
+        assert!(cli.help_keymap);
+        assert_eq!(cli.file, Some(PathBuf::from("data.csv")));
     }
 
     #[test]

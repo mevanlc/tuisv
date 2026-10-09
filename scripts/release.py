@@ -461,7 +461,18 @@ def stage(directory=Path("dist")):
             if "-" in manifest["version"]:
                 args.append("--prerelease")
             run(*args)
-        release = release_state(tag)
+        # Creation can succeed before the draft appears in GitHub's read APIs.
+        # Retry reads only: never create another draft to recover visibility.
+        for attempt in range(6):
+            release = release_state(tag)
+            if release is not None:
+                break
+            if attempt < 5:
+                time.sleep(2**attempt)
+        require(
+            release is not None,
+            "Created draft is not visible yet; rerun failed jobs to reconcile",
+        )
     require(
         release["prerelease"] == ("-" in manifest["version"]),
         "Existing release has the wrong prerelease status",

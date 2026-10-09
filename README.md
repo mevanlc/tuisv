@@ -29,7 +29,7 @@ builds report `0.0.0`; release builds get their version from the Git tag.
 ## Usage
 
 ```text
-tuisv [OPTIONS] <FILE>
+tuisv [OPTIONS] [FILE]
 
 Options:
       --csv               Force comma-separated input
@@ -41,6 +41,7 @@ Options:
       --no-sticky-header  Scroll the header with the data
       --sticky-leader     Keep column 1 visible while scrolling horizontally
       --no-sticky-leader  Scroll column 1 with the other columns (the default)
+      --help-keymap       Print the interactive keymap and exit
   -h, --help              Print help
   -V, --version           Print version
 ```
@@ -80,11 +81,22 @@ record widths. For multiple columns, rectangular parses take precedence over
 parses with shorter rows, and CSV wins ties. Use `--csv` or `--tsv` to override
 detection. These flags and `--detect` are mutually exclusive.
 
-Use the arrow keys to move the selected cell. Ctrl-Shift-Left and
-Ctrl-Shift-Right shrink or grow its column; header `│` handles can also be dragged
-to resize columns. Truncated cells end in a gray `…`. The vertical and horizontal
-mouse wheels pan the viewport without changing the selection; Shift-wheel is a
-horizontal-scroll fallback.
+Use the arrow keys to move the selected cell, or left-click a data cell to select
+it and release filter focus. Cell padding and empty cells are selectable; column
+gaps and space outside the table are ignored. Clicking keeps the viewport in place
+and leaves filter values and ongoing filtering active.
+
+Shift-Left and Shift-Right swap the selected cell's column with the adjacent
+column; selection follows the moved column. Its header,
+width, color, sorting, and filter stay attached. Moves stop at the table edges and
+apply outside filter editing and help. Column order is a view setting; each
+transpose orientation remembers its own order, and the sticky leader always pins
+the first displayed column.
+
+Ctrl-Shift-Left and Ctrl-Shift-Right shrink or grow the selected column; header `│`
+handles can also be dragged to resize columns. Truncated cells end in a gray `…`.
+The vertical and horizontal mouse wheels pan the viewport without changing the
+selection; Shift-wheel is a horizontal-scroll fallback.
 
 Click a column header or press Ctrl-S to sort the selected cell's column. The
 first sort is descending. Sorting the primary column again toggles its direction;
@@ -110,7 +122,7 @@ filter row, and resets selection and scrolling to the top-left. With headers,
 the first column becomes the new header and the original header becomes the
 first column; `--no-header` keeps both orientations headerless. Missing cells in
 ragged rows appear as empty strings in the transpose. Toggling back restores the
-original rows exactly, and each orientation remembers its column widths.
+original rows exactly, and each orientation remembers its column widths and order.
 
 Press Ctrl-R to clear all sorting and filter values, restore file order, and
 cancel an active filter in the current orientation. Only Ctrl-T changes
@@ -118,6 +130,9 @@ orientation. Press `?` outside an active filter textarea for the
 scrollable keymap. Escape acts as Back: it closes help, then the filter row, then
 resets sorting, and finally exits. Press `q` or `Q` to exit when neither a filter
 textarea nor the help dialog has focus; Ctrl-C exits at any time.
+
+Run `tuisv --help-keymap` to print the same keymap to the terminal and exit. No file
+is required, and the output can be piped or redirected.
 
 The file is read fully into memory as UTF-8 CSV or TSV. Embedded control characters
 are shown as escapes so each record occupies one terminal row.

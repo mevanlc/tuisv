@@ -43,7 +43,9 @@ After the first publication:
    owner `mevanlc`, repository `tuisv`, workflow `release.yml`, environment `crates-io`.
 2. Run Release manually on `main` with mode `verify-oidc`. It obtains a temporary
    token and automatically revokes it at job completion; it cannot publish.
-3. Delete the bootstrap `CARGO_REGISTRY_TOKEN` secret and revoke its crates.io token.
+3. Delete the bootstrap `CARGO_REGISTRY_TOKEN` secret. Revoke its crates.io token
+   only if it was dedicated to this bootstrap; keep a shared token valid for
+   other projects that still use it.
 
 The workflow uses the bootstrap secret when present and otherwise uses OIDC.
 An already-published matching crate needs neither credential mechanism to be
@@ -129,7 +131,7 @@ normalized archive metadata do not make hosted runner images immutable.
 ## Adapting this example
 
 Copy the two workflows, the release helper and tests, the target matrix,
-`rust-toolchain.toml`, and the relevant packaging/license metadata. This is a
+`rust-toolchain.toml`, `.gitattributes`, and the relevant packaging/license metadata. This is a
 copyable example, not a centrally hosted workflow dependency.
 
 - Update the Cargo package/binary names, repository URL, description, license,

@@ -34,6 +34,7 @@ pub(crate) struct FilterUpdate {
 pub(crate) struct FilterState {
     visible: bool,
     editing: bool,
+    // Editors and worker results use source column indices, independent of display order.
     editors: Vec<TextArea<'static>>,
     active_column: usize,
     pending_since: Option<Instant>,
@@ -90,14 +91,8 @@ impl FilterState {
         self.editing = !self.editors.is_empty();
     }
 
-    pub(crate) fn move_active_column(&mut self, delta: isize) {
-        if self.editors.is_empty() {
-            return;
-        }
-        self.active_column = self
-            .active_column
-            .saturating_add_signed(delta)
-            .min(self.editors.len() - 1);
+    pub(crate) fn release_focus(&mut self) {
+        self.editing = false;
     }
 
     pub(crate) fn editor_mut(&mut self, column: usize) -> Option<&mut TextArea<'static>> {
