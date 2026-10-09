@@ -42,6 +42,10 @@ const HELP_ENTRIES: &[HelpEntry] = &[
     ),
     HelpEntry::Section("Navigation"),
     HelpEntry::Binding("Arrow keys", "Move the selected cell"),
+    HelpEntry::Binding(
+        "Left-click cell",
+        "Select that cell and release filter focus",
+    ),
     HelpEntry::Binding("Mouse wheel", "Pan without moving the selection"),
     HelpEntry::Binding("Shift-wheel", "Pan horizontally"),
     HelpEntry::Section("Sorting"),
@@ -519,7 +523,9 @@ fn push_cell(spans: &mut Vec<Span<'static>>, value: &str, width: usize, style: S
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 
     use super::*;
@@ -643,6 +649,67 @@ mod tests {
         assert_eq!(buffer[(0, 1)].symbol(), "c");
         assert_eq!(buffer[(6, 1)].symbol(), "▼");
         assert_eq!(buffer[(8, 1)].symbol(), "n");
+    }
+
+    #[test]
+    fn cell_clicks_highlight_wide_characters_in_clipped_reordered_and_transposed_columns() {
+        let data =
+            TableData::from_reader("name,city\nAda,東京\nBob,Rome\n".as_bytes(), true).unwrap();
+        let mut app = App::new(data, true, true);
+        let mut terminal = Terminal::new(TestBackend::new(8, 4)).unwrap();
+        let click = |column, row| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        app.handle_event(click(7, 1)); // continuation cell of 東
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(6, 1)].symbol(), "東");
+        assert!(buffer[(6, 1)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(0, 1)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(app.column_offset, 0);
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::SHIFT,
+        )));
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "c");
+        assert_eq!(buffer[(0, 1)].symbol(), "東");
+        assert_eq!(buffer[(0, 1)].fg, Color::Green);
+        assert!(buffer[(0, 1)].modifier.contains(Modifier::REVERSED));
+        app.handle_event(click(7, 2));
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(6, 2)].symbol(), "B");
+        assert!(buffer[(6, 2)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(0, 1)].modifier.contains(Modifier::REVERSED));
+
+        app.handle_event(control_key('t'));
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        app.handle_event(click(7, 1));
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(6, 1)].symbol(), "東");
+        assert!(buffer[(6, 1)].modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

@@ -81,8 +81,13 @@ record widths. For multiple columns, rectangular parses take precedence over
 parses with shorter rows, and CSV wins ties. Use `--csv` or `--tsv` to override
 detection. These flags and `--detect` are mutually exclusive.
 
-Use the arrow keys to move the selected cell. Shift-Left and Shift-Right swap its
-column with the adjacent column; selection follows the moved column. Its header,
+Use the arrow keys to move the selected cell, or left-click a data cell to select
+it and release filter focus. Cell padding and empty cells are selectable; column
+gaps and space outside the table are ignored. Clicking keeps the viewport in place
+and leaves filter values and ongoing filtering active.
+
+Shift-Left and Shift-Right swap the selected cell's column with the adjacent
+column; selection follows the moved column. Its header,
 width, color, sorting, and filter stay attached. Moves stop at the table edges and
 apply outside filter editing and help. Column order is a view setting; each
 transpose orientation remembers its own order, and the sticky leader always pins

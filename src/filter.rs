@@ -91,6 +91,10 @@ impl FilterState {
         self.editing = !self.editors.is_empty();
     }
 
+    pub(crate) fn release_focus(&mut self) {
+        self.editing = false;
+    }
+
     pub(crate) fn editor_mut(&mut self, column: usize) -> Option<&mut TextArea<'static>> {
         self.editors.get_mut(column)
     }

@@ -334,7 +334,12 @@ impl App {
                     });
                 } else {
                     self.column_resize_drag = None;
-                    self.sort_from_header_click(mouse.column, mouse.row);
+                    if let Some(cell) = self.cell_at(mouse.column, mouse.row) {
+                        self.selected = Some(cell);
+                        self.filter.release_focus();
+                    } else {
+                        self.sort_from_header_click(mouse.column, mouse.row);
+                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -369,6 +374,35 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn cell_at(&self, screen_column: u16, screen_row: u16) -> Option<CellPosition> {
+        if usize::from(screen_column) >= self.viewport_width
+            || usize::from(screen_row) >= self.viewport_height
+        {
+            return None;
+        }
+        let fixed_rows = usize::from(self.filter.is_visible())
+            + usize::from(self.sticky_header && self.data.header.is_some());
+        let visual_row = self
+            .row_offset
+            .saturating_add(usize::from(screen_row).checked_sub(fixed_rows)?);
+        let row = visual_row.checked_sub(usize::from(
+            !self.sticky_header && self.data.header.is_some(),
+        ))?;
+        if row >= self.sort.row_count() {
+            return None;
+        }
+        let content_column = self.content_column_at(screen_column);
+        let column = self
+            .data
+            .column_starts
+            .iter()
+            .zip(&self.data.widths)
+            .position(|(start, width)| {
+                content_column >= *start && content_column < start.saturating_add(*width)
+            })?;
+        Some(CellPosition { row, column })
     }
 
     fn sort_from_header_click(&mut self, screen_column: u16, screen_row: u16) {
@@ -792,6 +826,160 @@ mod tests {
         app.handle_event(key(KeyCode::Left));
         app.handle_event(key(KeyCode::Left));
         assert_eq!(app.column_offset, 0);
+    }
+
+    #[test]
+    fn left_click_selects_cell_padding_and_missing_cells_but_ignores_gaps_and_empty_space() {
+        let mut app = app("name,city,age\nAda,London,37\nBob,,42\nCal\n", true, true);
+        app.set_viewport(24, 6);
+        app.handle_event(click(3, 1)); // padding after Ada
+        assert_eq!(app.selected, Some(CellPosition { row: 0, column: 0 }));
+        app.handle_event(click(10, 2)); // empty city cell
+        assert_eq!(app.selected, Some(CellPosition { row: 1, column: 1 }));
+        app.handle_event(click(16, 3)); // missing age cell in a ragged record
+        assert_eq!(app.selected, Some(CellPosition { row: 2, column: 2 }));
+        let selected = app.selected;
+        for (x, y) in [
+            (4, 1),
+            (5, 1),
+            (12, 2),
+            (13, 2),
+            (17, 3),
+            (19, 1),
+            (0, 4),
+            (24, 1),
+            (0, 6),
+        ] {
+            app.handle_event(click(x, y));
+            assert_eq!(app.selected, selected, "click at ({x}, {y})");
+        }
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Right), 0, 1));
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Middle), 0, 1));
+        app.handle_event(key(KeyCode::Char('?')));
+        app.handle_event(click(0, 1));
+        assert_eq!(app.selected, selected);
+    }
+
+    #[test]
+    fn cell_clicks_account_for_filter_rows_and_sticky_scrolling_or_absent_headers() {
+        for (has_header, sticky_header) in [(true, true), (true, false), (false, false)] {
+            for filter_visible in [false, true] {
+                let mut app = app("a,b\n0,x\n1,y\n2,z\n3,w\n4,v\n", has_header, sticky_header);
+                app.set_viewport(6, 4);
+                if filter_visible {
+                    app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+                }
+                let first_body_row = u16::from(filter_visible) + u16::from(has_header);
+                app.handle_event(click(3, first_body_row + 1));
+                assert_eq!(app.selected, Some(CellPosition { row: 1, column: 1 }));
+                assert!(!app.filter.is_editing());
+
+                app.row_offset = 2;
+                let fixed_rows = u16::from(filter_visible) + u16::from(has_header && sticky_header);
+                app.handle_event(click(3, fixed_rows));
+                let expected_row = 2 - usize::from(has_header && !sticky_header);
+                assert_eq!(
+                    app.selected,
+                    Some(CellPosition {
+                        row: expected_row,
+                        column: 1
+                    })
+                );
+                assert_eq!(app.row_offset, 2);
+                assert_eq!(app.column_offset, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn cell_clicks_follow_horizontal_panning_reordering_and_the_clipped_sticky_leader() {
+        for sticky_leader in [false, true] {
+            let mut app = app(
+                "lead,second,third\nAda,123456,abcdef\nBob,654321,fedcba\n",
+                true,
+                true,
+            );
+            app.sticky_leader = sticky_leader;
+            app.set_viewport(14, 4);
+            app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+            assert_eq!(app.data.column_order, [1, 0, 2]);
+            app.column_offset = 6;
+            app.handle_event(click(8, 2));
+            assert_eq!(app.selected, Some(CellPosition { row: 1, column: 2 }));
+            assert_eq!(app.column_offset, 6);
+            if sticky_leader {
+                app.handle_event(click(0, 2));
+                assert_eq!(app.selected, Some(CellPosition { row: 1, column: 0 }));
+                let selected = app.selected;
+                app.handle_event(click(6, 2));
+                assert_eq!(app.selected, selected); // fixed leader's gap
+
+                app.set_viewport(4, 4);
+                app.column_offset = 6;
+                app.handle_event(click(3, 2));
+                assert_eq!(app.selected.unwrap().column, 2);
+                app.handle_event(click(2, 2));
+                assert_eq!(app.selected.unwrap().column, 0);
+                assert_eq!(app.column_offset, 6);
+            } else {
+                app.set_viewport(10, 4);
+                app.column_offset = 9; // viewport begins inside the moved lead column
+                app.handle_event(click(0, 2));
+                assert_eq!(app.selected.unwrap().column, 1);
+                assert_eq!(app.column_offset, 9);
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_a_sorted_cell_releases_filter_focus_and_preserves_pending_filtering() {
+        let mut app = app(
+            "name,city,score\nAda,London,9\nBob,Rome,10\nCal,London,2\n",
+            true,
+            true,
+        );
+        app.set_viewport(30, 6);
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["Bob", "Ada", "Cal"]);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.handle_event(click(6, 0));
+        send_text(&mut app, "^L");
+        app.handle_event(click(14, 3));
+        assert_eq!(app.selected, Some(CellPosition { row: 1, column: 2 }));
+        assert_eq!(app.displayed_row(1).unwrap()[2], "9");
+        assert!(!app.filter.is_editing());
+        assert!(app.filter.is_visible());
+        assert_eq!(app.filter.pattern(1), Some("^L"));
+        wait_for_filtered_rows(&mut app, 2);
+        assert_eq!(displayed_column(&app, 0), ["Ada", "Cal"]);
+        app.handle_event(click(14, 2));
+        assert_eq!(app.selected, Some(CellPosition { row: 0, column: 2 }));
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.data.column_order, [0, 2, 1]);
+        assert_eq!(app.selected.unwrap().column, 1);
+        assert_eq!(app.sort_indicator(1), Some('▼'));
+        assert_eq!(displayed_column(&app, 0), ["Ada", "Cal"]);
+    }
+
+    #[test]
+    fn body_clicks_are_safe_without_data_and_do_not_blur_filters_on_a_miss() {
+        for csv in ["", "name,city\n"] {
+            let mut app = app(csv, true, true);
+            app.set_viewport(20, 4);
+            app.handle_event(click(0, 1));
+            assert_eq!(app.selected, None);
+        }
+        let mut app = app("name,city\nAda,London\n", true, true);
+        app.set_viewport(20, 5);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let selected = app.selected;
+        for (x, y) in [(4, 2), (0, 3), (4, 0)] {
+            app.handle_event(click(x, y));
+            assert_eq!(app.selected, selected);
+            assert!(app.filter.is_editing());
+        }
     }
 
     #[test]
