@@ -193,7 +193,15 @@ impl App {
     }
 
     pub(crate) fn sort_indicator(&self, column: usize) -> Option<char> {
-        self.sort.indicator(column)
+        self.sort.indicator(self.data.column_order[column])
+    }
+
+    fn active_filter_column(&self) -> usize {
+        self.data
+            .column_order
+            .iter()
+            .position(|&source| source == self.filter.active_column())
+            .unwrap_or(0)
     }
 
     pub(crate) fn help_visible(&self) -> bool {
@@ -240,7 +248,8 @@ impl App {
             }
             KeyCode::Char('s' | 'S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(selected) = self.selected {
-                    self.sort.sort_by_column(&self.data, selected.column);
+                    self.sort
+                        .sort_by_column(&self.data, self.data.column_order[selected.column]);
                 }
                 return;
             }
@@ -299,6 +308,8 @@ impl App {
 
         match key.code {
             KeyCode::Char('q' | 'Q') => self.quit = true,
+            KeyCode::Left if key.modifiers == KeyModifiers::SHIFT => self.shift_column(-1),
+            KeyCode::Right if key.modifiers == KeyModifiers::SHIFT => self.shift_column(1),
             KeyCode::Up => self.move_selection(-1, 0),
             KeyCode::Down => self.move_selection(1, 0),
             KeyCode::Left => self.move_selection(0, -1),
@@ -373,7 +384,8 @@ impl App {
                 content_column >= *start && content_column <= start.saturating_add(*width)
             });
         if let Some(column) = clicked_column {
-            self.sort.sort_by_column(&self.data, column);
+            self.sort
+                .sort_by_column(&self.data, self.data.column_order[column]);
         }
     }
 
@@ -414,6 +426,23 @@ impl App {
         };
         self.focus_filter_column(column);
         true
+    }
+
+    fn shift_column(&mut self, delta: isize) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let Some(column) = selected
+            .column
+            .checked_add_signed(delta)
+            .filter(|&column| column < self.data.column_count())
+        else {
+            return;
+        };
+        self.data.swap_columns(selected.column, column);
+        self.selected = Some(CellPosition { column, ..selected });
+        self.column_resize_drag = None;
+        self.ensure_selection_visible();
     }
 
     fn resize_selected_column(&mut self, delta: isize) {
@@ -462,7 +491,9 @@ impl App {
     }
 
     fn toggle_filter(&mut self) {
-        let selected_column = self.selected.map(|selected| selected.column);
+        let selected_column = self
+            .selected
+            .map(|selected| self.data.column_order[selected.column]);
         let update = self
             .filter
             .toggle(Arc::clone(&self.data.rows), selected_column);
@@ -470,7 +501,7 @@ impl App {
             self.apply_filter_update(update);
         }
         if self.filter.is_visible() {
-            self.activate_filter_column(self.filter.active_column());
+            self.activate_filter_column(self.active_filter_column());
         }
     }
 
@@ -518,17 +549,24 @@ impl App {
     }
 
     fn move_filter_focus(&mut self, delta: isize) {
-        self.filter.move_active_column(delta);
-        self.focus_filter_column(self.filter.active_column());
+        let column = self
+            .active_filter_column()
+            .saturating_add_signed(delta)
+            .min(self.data.column_count().saturating_sub(1));
+        self.focus_filter_column(column);
     }
 
     fn focus_filter_column(&mut self, column: usize) {
-        self.filter.focus_column(column);
+        if let Some(&source) = self.data.column_order.get(column) {
+            self.filter.focus_column(source);
+        }
         self.activate_filter_column(column);
     }
 
     fn activate_filter_column(&mut self, column: usize) {
-        self.filter.activate_column(column);
+        if let Some(&source) = self.data.column_order.get(column) {
+            self.filter.activate_column(source);
+        }
         if let Some(selected) = &mut self.selected {
             selected.column = column;
         }
@@ -552,7 +590,7 @@ impl App {
             .map_or(0, |selected| selected.row.min(self.sort.row_count() - 1));
         let column = self
             .selected
-            .map_or(self.filter.active_column(), |selected| {
+            .map_or(self.active_filter_column(), |selected| {
                 selected.column.min(self.data.column_count() - 1)
             });
         self.selected = Some(CellPosition { row, column });
@@ -1104,6 +1142,187 @@ mod tests {
         app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
         app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert_eq!(displayed_column(&app, 0), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn shift_arrows_move_the_selected_column_and_its_width_without_changing_records() {
+        let mut app = app("a,bb,ccc\n1\n2,3,4,5\n", true, true);
+        app.set_viewport(7, 3);
+        app.data.set_column_width(0, 4);
+        let original = app.data.clone();
+        app.handle_event(key(KeyCode::Down));
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.data, original);
+
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(app.data.column_order, [1, 0, 2, 3]);
+        assert_eq!(app.data.widths, [2, 4, 3, 1]);
+        assert_eq!(app.data.column_starts, [0, 4, 10, 15]);
+        assert_eq!(app.selected, Some(CellPosition { row: 1, column: 1 }));
+        assert_eq!(app.column_offset, 1);
+        assert!(Arc::ptr_eq(&app.data.rows, &original.rows));
+        assert_eq!(app.data.header, original.header);
+
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        let at_edge = app.data.clone();
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(app.data, at_edge);
+        assert_eq!(app.selected.unwrap().column, 3);
+        for _ in 0..3 {
+            app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        }
+        assert_eq!(app.data, original);
+        assert_eq!(app.selected, Some(CellPosition { row: 1, column: 0 }));
+    }
+
+    #[test]
+    fn shift_arrows_are_safe_for_empty_header_only_and_single_column_tables() {
+        for csv in ["", "a,b\n", "a\n1\n"] {
+            let mut app = app(csv, true, true);
+            let original = app.data.clone();
+            let selected = app.selected;
+            for code in [KeyCode::Left, KeyCode::Right] {
+                app.handle_event(modified_key(code, KeyModifiers::SHIFT));
+            }
+            assert_eq!(app.data, original);
+            assert_eq!(app.selected, selected);
+        }
+    }
+
+    #[test]
+    fn reordered_columns_keep_sort_priority_and_use_the_new_header_positions() {
+        let mut app = app("name,score,group\nAda,9,x\nBob,10,x\nCal,2,y\n", true, true);
+        app.set_viewport(40, 5);
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(displayed_column(&app, 0), ["Cal", "Bob", "Ada"]);
+
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.sort_indicator(1), Some('▼'));
+        assert_eq!(app.sort_indicator(2), Some('▽'));
+        assert_eq!(displayed_column(&app, 0), ["Cal", "Bob", "Ada"]);
+        app.handle_event(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(app.sort_indicator(1), Some('▲'));
+        assert_eq!(displayed_column(&app, 0), ["Bob", "Ada", "Cal"]);
+
+        let score_start = app.data.column_starts[2] as u16;
+        app.handle_event(click(score_start, 0));
+        assert_eq!(app.sort_indicator(2), Some('▼'));
+        assert_eq!(app.sort_indicator(1), Some('△'));
+        assert_eq!(displayed_column(&app, 0), ["Bob", "Ada", "Cal"]);
+        app.handle_event(click(score_start, 0));
+        assert_eq!(displayed_column(&app, 0), ["Cal", "Ada", "Bob"]);
+    }
+
+    #[test]
+    fn moving_a_column_preserves_in_flight_and_hidden_filters_and_visual_field_navigation() {
+        let mut app = app(
+            "name,city,score\nAda,London,9\nBob,Rome,10\nCal,London,2\n",
+            true,
+            true,
+        );
+        app.set_viewport(40, 6);
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        send_text(&mut app, "^London$");
+        app.handle_event(key(KeyCode::Enter));
+        assert!(app.filter.is_processing());
+        let rows = Arc::clone(&app.data.rows);
+
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.data.column_order, [1, 0, 2]);
+        assert_eq!(app.selected.unwrap().column, 0);
+        assert!(app.filter.is_processing());
+        assert!(Arc::ptr_eq(&rows, &app.data.rows));
+        wait_for_filter_worker(&mut app, 2);
+        assert_eq!(displayed_column(&app, 0), ["Ada", "Cal"]);
+        assert_eq!(app.active_filter_column(), 0);
+
+        app.handle_event(key(KeyCode::Tab));
+        assert_eq!(app.filter.active_column(), 0); // name is now the second field
+        assert_eq!(app.selected.unwrap().column, 1);
+        app.handle_event(key(KeyCode::BackTab));
+        assert_eq!(app.filter.active_column(), 1);
+        assert_eq!(app.selected.unwrap().column, 0);
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(app.data.column_order, [1, 0, 2]); // textarea keeps Shift-arrow
+        app.handle_event(key(KeyCode::Enter));
+
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.sort.row_count(), 3);
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(app.data.column_order, [0, 2, 1]);
+        app.handle_event(modified_key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.filter.active_column(), 1);
+        assert_eq!(app.selected.unwrap().column, 2);
+        wait_for_filter_worker(&mut app, 2);
+        assert_eq!(displayed_column(&app, 0), ["Ada", "Cal"]);
+        app.handle_event(click(app.data.column_starts[1] as u16, 0));
+        assert_eq!(app.filter.active_column(), 2);
+        assert_eq!(app.selected.unwrap().column, 1);
+
+        send_text(&mut app, "never matches");
+        app.handle_event(key(KeyCode::Enter));
+        wait_for_filter_worker(&mut app, 0);
+        let order = app.data.column_order.clone();
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.data.column_order, order);
+        app.handle_event(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.selected.unwrap().column, 1);
+        assert_eq!(app.data.column_order, order);
+    }
+
+    #[test]
+    fn each_transpose_orientation_remembers_column_order_and_help_is_modal() {
+        let mut app = app("name,age\nAda,37\nBob\n", true, true);
+        app.set_viewport(40, 8);
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        let original = app.data.clone();
+        app.handle_event(key(KeyCode::Char('?')));
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.data, original);
+        app.handle_event(key(KeyCode::Esc));
+
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.data.column_order, [0, 1, 2]);
+        assert_eq!(app.data.header.as_ref().unwrap(), &["name", "Ada", "Bob"]);
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        app.data.set_column_width(1, 2);
+        let transposed = app.data.clone();
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, original);
+        assert!(Arc::ptr_eq(&app.data.rows, &original.rows));
+        app.handle_event(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, original);
+        app.handle_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.data, transposed);
+    }
+
+    #[test]
+    fn shifts_across_the_sticky_leader_follow_the_selected_column_and_cancel_dragging() {
+        let mut app = app("a,wide_header,c\n1,2,3\n", true, true);
+        app.sticky_leader = true;
+        app.set_viewport(8, 3);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 0));
+        assert!(app.column_resize_drag.is_some());
+
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(app.column_resize_drag.is_none());
+        assert_eq!(app.data.column_order, [1, 0, 2]);
+        assert_eq!(app.column_viewports()[0].width, 7);
+        assert_eq!(app.selected.unwrap().column, 1);
+        assert_eq!(app.column_offset, 0);
+        app.handle_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(app.column_offset > 0);
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        app.handle_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.selected.unwrap().column, 0);
+        assert_eq!(app.data.column_order, [0, 1, 2]);
+        assert_eq!(app.column_viewports()[0].width, 3);
     }
 
     #[test]

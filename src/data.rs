@@ -15,6 +15,9 @@ pub enum InputFormat {
 pub struct TableData {
     pub header: Option<Vec<String>>,
     pub rows: Arc<Vec<Vec<String>>>,
+    /// Source column indices in display order; records stay in their original order.
+    pub column_order: Vec<usize>,
+    /// Widths and positions follow display order.
     pub widths: Vec<usize>,
     pub column_starts: Vec<usize>,
     pub content_width: usize,
@@ -97,6 +100,7 @@ impl TableData {
         Self {
             header,
             rows: Arc::new(rows),
+            column_order: (0..column_count).collect(),
             widths,
             column_starts,
             content_width,
@@ -105,6 +109,12 @@ impl TableData {
 
     pub fn column_count(&self) -> usize {
         self.widths.len()
+    }
+
+    pub(crate) fn swap_columns(&mut self, left: usize, right: usize) {
+        self.column_order.swap(left, right);
+        self.widths.swap(left, right);
+        (self.column_starts, self.content_width) = column_geometry(&self.widths);
     }
 
     pub(crate) fn resize_column(&mut self, column: usize, delta: isize) {

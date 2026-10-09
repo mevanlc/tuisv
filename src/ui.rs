@@ -54,10 +54,39 @@ const HELP_ENTRIES: &[HelpEntry] = &[
     HelpEntry::Binding("Ctrl-A", "Move to the beginning of the filter line"),
     HelpEntry::Binding("Enter", "Apply the edit and release filter focus"),
     HelpEntry::Binding("Filter click", "Focus that column's filter field"),
-    HelpEntry::Section("Column width"),
+    HelpEntry::Section("Columns"),
+    HelpEntry::Binding("Shift-← / →", "Move the selected column left or right"),
     HelpEntry::Binding("Ctrl-Shift-← / →", "Shrink or grow the selected column"),
     HelpEntry::Binding("Drag header │", "Resize that column"),
 ];
+
+pub(crate) fn keymap_text() -> String {
+    let key_width = HELP_ENTRIES
+        .iter()
+        .filter_map(|entry| match entry {
+            HelpEntry::Binding(key, _) => Some(Span::raw(*key).width()),
+            HelpEntry::Section(_) => None,
+        })
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut text = String::from("tuisv keymap\n");
+    for entry in HELP_ENTRIES {
+        match entry {
+            HelpEntry::Section(section) => {
+                text.push('\n');
+                text.push_str(section);
+            }
+            HelpEntry::Binding(key, description) => {
+                text.push_str(key);
+                text.push_str(&" ".repeat(key_width - Span::raw(*key).width()));
+                text.push_str(description);
+            }
+        }
+        text.push('\n');
+    }
+    text
+}
 
 fn header_style() -> Style {
     Style::new()
@@ -179,6 +208,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let viewports = app.column_viewports();
 
     for column in 0..app.data.column_count() {
+        let source = app.data.column_order[column];
         let viewport = viewports
             .iter()
             .find(|viewport| viewport.columns.contains(&column))
@@ -190,14 +220,14 @@ fn render_filter_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let column_end = column_start.saturating_add(column_width);
         let visible_start = column_start.max(viewport_start);
         let visible_end = column_end.min(viewport_end);
-        let active = editing && column == active_column;
-        let style = filter_style(active, app.filter.has_error(column), processing && active);
+        let active = editing && source == active_column;
+        let style = filter_style(active, app.filter.has_error(source), processing && active);
 
         if visible_start < visible_end {
             let local_width = u16::try_from(column_width).unwrap_or(u16::MAX);
             let local_area = Rect::new(0, 0, local_width, 1);
             let mut local = Buffer::empty(local_area);
-            if let Some(editor) = app.filter.editor_mut(column) {
+            if let Some(editor) = app.filter.editor_mut(source) {
                 editor.set_style(style);
                 editor.set_cursor_line_style(Style::default());
                 editor.set_cursor_style(if active {
@@ -431,11 +461,12 @@ fn record_line(
     let is_header = base_style.bg == Some(Color::DarkGray);
 
     for column in columns {
-        let value = record.get(column).map_or("", String::as_str);
+        let source = data.column_order[column];
+        let value = record.get(source).map_or("", String::as_str);
         let style = if is_header {
             base_style
         } else {
-            column_style(column, selected.is_some_and(|cell| cell.column == column))
+            column_style(source, selected.is_some_and(|cell| cell.column == column))
         };
         push_cell(&mut spans, value, data.widths[column], style);
 
@@ -514,6 +545,104 @@ mod tests {
             .draw(|frame| super::render(frame, &mut app))
             .unwrap();
         app
+    }
+
+    #[test]
+    fn terminal_keymap_contains_the_shared_bindings_without_terminal_escapes() {
+        let text = keymap_text();
+        assert!(text.contains("Shift-← / →"));
+        assert!(text.contains("Move the selected column left or right"));
+        assert!(text.contains("Ctrl-Shift-← / →"));
+        assert!(!text.contains('\x1b'));
+        for entry in HELP_ENTRIES {
+            match entry {
+                HelpEntry::Section(section) => assert!(text.contains(section)),
+                HelpEntry::Binding(key, description) => {
+                    assert!(
+                        text.lines()
+                            .any(|line| line.starts_with(key) && line.ends_with(description))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reordered_ragged_columns_render_headers_cells_and_selection_in_each_header_mode() {
+        for (has_header, sticky_header) in [(true, true), (true, false), (false, false)] {
+            let data =
+                TableData::from_reader("name,city\nAda,London\nBob\n".as_bytes(), has_header)
+                    .unwrap();
+            let mut app = App::new(data, sticky_header, false);
+            app.data.set_column_width(0, 3);
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Right,
+                KeyModifiers::SHIFT,
+            )));
+            let backend = TestBackend::new(16, 4);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+
+            assert_eq!(buffer[(0, 0)].symbol(), "c");
+            assert_eq!(buffer[(7, 0)].symbol(), if has_header { "│" } else { " " });
+            assert_eq!(buffer[(8, 0)].symbol(), "n");
+            assert_eq!(buffer[(10, 0)].symbol(), "…");
+            assert_eq!(buffer[(0, 1)].symbol(), "L");
+            assert_eq!(buffer[(0, 1)].fg, Color::Green);
+            assert_eq!(buffer[(8, 1)].symbol(), "A");
+            assert_eq!(buffer[(8, 1)].fg, Color::Cyan);
+            let selected_row = usize::from(has_header) as u16;
+            assert!(
+                buffer[(8, selected_row)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+            assert!(
+                !buffer[(0, selected_row)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+            assert_eq!(buffer[(0, 2)].symbol(), " ");
+            assert_eq!(buffer[(8, 2)].symbol(), "B");
+        }
+    }
+
+    #[test]
+    fn moved_filter_text_errors_and_sort_indicators_align_with_a_new_sticky_leader() {
+        let data =
+            TableData::from_reader("name,city\nAda,London\nBob,Rome\n".as_bytes(), true).unwrap();
+        let mut app = App::new(data, true, true);
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(control_key('s'));
+        app.handle_event(control_key('f'));
+        app.filter.editor_mut(1).unwrap().insert_str("(");
+        app.handle_event(key(KeyCode::Enter));
+        // Move before the result is applied so the selected cell is still available.
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::SHIFT,
+        )));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while app.filter.is_processing() {
+            assert!(std::time::Instant::now() < deadline);
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(app.filter.has_error(1));
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "(");
+        assert_eq!(buffer[(0, 0)].fg, Color::LightRed);
+        assert_eq!(buffer[(0, 1)].symbol(), "c");
+        assert_eq!(buffer[(6, 1)].symbol(), "▼");
+        assert_eq!(buffer[(8, 1)].symbol(), "n");
     }
 
     #[test]
